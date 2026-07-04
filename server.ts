@@ -3,8 +3,10 @@ import path from "path";
 import fs from "fs";
 import cors from "cors";
 import dotenv from "dotenv";
+import crypto from "crypto";
 import { initializeApp, cert } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
+import { getStorage } from "firebase-admin/storage";
 
 // Load environment variables from .env file if it exists
 dotenv.config();
@@ -318,11 +320,13 @@ const INITIAL_DATA = {
 };
 
 let db: any = null;
+let firebaseApp: any = null;
 let storeInMemory: any = null;
 
 try {
-  let firebaseApp: any = null;
   const saEnv = process.env.FIREBASE_SERVICE_ACCOUNT;
+  const storageBucket = process.env.FIREBASE_STORAGE_BUCKET || "future-audio-ndpgw.firebasestorage.app";
+
   if (saEnv) {
     try {
       let saJson: any;
@@ -335,7 +339,8 @@ try {
       }
       firebaseApp = initializeApp({
         credential: cert(saJson),
-        projectId: saJson.project_id || "future-audio-ndpgw"
+        projectId: saJson.project_id || "future-audio-ndpgw",
+        storageBucket: storageBucket
       });
       console.log("[Firebase] Admin SDK connected using custom FIREBASE_SERVICE_ACCOUNT environment variable.");
     } catch (parseErr) {
@@ -345,13 +350,20 @@ try {
 
   if (!firebaseApp) {
     firebaseApp = initializeApp({
-      projectId: "future-audio-ndpgw"
+      projectId: "future-audio-ndpgw",
+      storageBucket: storageBucket
     });
     console.log("[Firebase] Admin SDK connected using default application credentials.");
   }
 
-  db = getFirestore(firebaseApp, "ai-studio-erainfradevelope-fe3636c6-24f9-40c9-8d99-f86c21872188");
-  console.log("[Firebase] Admin SDK connected to Firestore database successfully.");
+  // Determine dynamic database ID:
+  // Standard standalone Firebase/GCP setups use "(default)".
+  // AI Studio workspace environment uses "ai-studio-erainfradevelope-fe3636c6-24f9-40c9-8d99-f86c21872188".
+  const databaseId = process.env.FIREBASE_DATABASE_ID || 
+    (process.env.FIREBASE_SERVICE_ACCOUNT ? "(default)" : "ai-studio-erainfradevelope-fe3636c6-24f9-40c9-8d99-f86c21872188");
+
+  db = getFirestore(firebaseApp, databaseId);
+  console.log(`[Firebase] Admin SDK connected to Firestore database "${databaseId}" successfully.`);
 } catch (err) {
   console.warn("[Firebase] Could not initialize Admin SDK dynamically, falling back to local file storage mode:", err);
 }
@@ -400,16 +412,18 @@ function saveStoreData(data: any) {
 
     backupKeys.forEach(async (key) => {
       try {
+        // Write to site_store
         const docRef = db.collection("site_store").doc(key);
-        if (key === "companyDetails") {
-          await docRef.set(data.companyDetails || {});
-        } else if (key === "seoSettings") {
-          await docRef.set(data.seoSettings || {});
-        } else if (key === "downloadCount") {
-          await docRef.set({ value: data.downloadCount !== undefined ? data.downloadCount : 42 });
-        } else {
-          await docRef.set({ list: data[key] || [] });
-        }
+        // Write to era_config
+        const docRefNew = db.collection("era_config").doc(key);
+
+        const val = key === "companyDetails" ? (data.companyDetails || {})
+                  : key === "seoSettings" ? (data.seoSettings || {})
+                  : key === "downloadCount" ? ({ value: data.downloadCount !== undefined ? data.downloadCount : 42 })
+                  : ({ list: data[key] || [] });
+
+        await docRef.set(val);
+        await docRefNew.set(val);
       } catch (err) {
         console.error(`[Firebase] Failed to write document key ${key}:`, err);
       }
@@ -422,9 +436,16 @@ async function syncFromFirestore() {
   if (db) {
     try {
       console.log("[Firebase] Syncing latest state from cloud database Firestore...");
-      const collRef = db.collection("site_store");
-      const snapshot = await collRef.get();
+      let collRef = db.collection("era_config");
+      let snapshot = await collRef.get();
       
+      // Fallback to site_store if era_config is empty
+      if (snapshot.empty) {
+        console.log("[Firebase] Collection 'era_config' is empty. Trying fallback collection 'site_store'...");
+        collRef = db.collection("site_store");
+        snapshot = await collRef.get();
+      }
+
       if (!snapshot.empty) {
         const loadedData: any = {};
         snapshot.forEach((doc: any) => {
@@ -496,6 +517,19 @@ app.get("/uploads/:filename", async (req, res) => {
     console.error("[Firebase] Error recovering file:", err);
     res.status(500).send("Internal Server Error");
   }
+});
+
+// Root Route for Standalone Deployment Checks
+app.get("/", (req, res) => {
+  res.json({
+    status: "online",
+    message: "Era Infra Standalone API Backend is running perfectly.",
+    timestamp: new Date().toISOString(),
+    endpoints: {
+      health: "/api/health",
+      siteData: "/api/site-data"
+    }
+  });
 });
 
 // API Routes
@@ -602,6 +636,83 @@ app.post("/api/admin/login", (req, res) => {
   }
 
   return res.status(401).json({ error: "Invalid login email or password." });
+});
+
+// Database and storage connectivity diagnostic check API
+app.get("/api/admin/db-status", async (req, res) => {
+  try {
+    const saEnvExists = !!process.env.FIREBASE_SERVICE_ACCOUNT;
+    const databaseId = process.env.FIREBASE_DATABASE_ID || 
+      (process.env.FIREBASE_SERVICE_ACCOUNT ? "(default)" : "ai-studio-erainfradevelope-fe3636c6-24f9-40c9-8d99-f86c21872188");
+    const storageBucket = process.env.FIREBASE_STORAGE_BUCKET || "future-audio-ndpgw.firebasestorage.app";
+    
+    let firestoreStatus = "Not Connected";
+    let firestoreError = null;
+    let testWriteSuccess = false;
+    let documentCount = 0;
+
+    if (db) {
+      try {
+        const testDocRef = db.collection("uploaded_files_test").doc("connection_check");
+        await testDocRef.set({
+          timestamp: new Date(),
+          sender: "AI Studio Diagnostic System"
+        });
+        
+        testWriteSuccess = true;
+        firestoreStatus = "Connected (Read/Write OK)";
+        
+        const snap = await db.collection("uploaded_files").limit(5).get();
+        documentCount = snap.size;
+      } catch (dbErr: any) {
+        firestoreStatus = "Connected but Permission/Auth Error";
+        firestoreError = dbErr?.message || dbErr;
+      }
+    }
+
+    let storageStatus = "Not Connected";
+    let storageError = null;
+    if (firebaseApp) {
+      try {
+        const storage = getStorage(firebaseApp);
+        const bucket = storage.bucket(storageBucket);
+        const [exists] = await bucket.exists();
+        if (exists) {
+          storageStatus = `Connected (${storageBucket})`;
+        } else {
+          storageStatus = `Bucket does not exist (${storageBucket})`;
+        }
+      } catch (storErr: any) {
+        storageStatus = "Configuration/Auth Error";
+        storageError = storErr?.message || storErr;
+      }
+    }
+
+    res.json({
+      success: true,
+      firebaseInitialized: !!firebaseApp,
+      saEnvExists,
+      databaseId,
+      storageBucket,
+      firestore: {
+        status: firestoreStatus,
+        error: firestoreError,
+        testWriteSuccess,
+        sampleFilesCount: documentCount
+      },
+      storage: {
+        status: storageStatus,
+        error: storageError
+      },
+      localUploads: {
+        path: UPLOADS_DIR,
+        exists: fs.existsSync(UPLOADS_DIR),
+        files: fs.existsSync(UPLOADS_DIR) ? fs.readdirSync(UPLOADS_DIR).length : 0
+      }
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 app.put("/api/admin/company", (req, res) => {
@@ -772,20 +883,66 @@ app.post("/api/admin/upload", async (req, res) => {
       return res.status(400).json({ error: "Filename and base64Data fields are required." });
     }
 
+    // Strip metadata prefixes if present (handles any file type MIME formatting)
     const cleanBase64 = base64Data.replace(/^data:.+;base64,/, "");
     const buffer = Buffer.from(cleanBase64, "base64");
     
+    // Sanitise filename to fit clean paths
     const safeName = Date.now() + "_" + filename.replace(/[^a-zA-Z0-9.\-_]/g, "");
     const destPath = path.join(UPLOADS_DIR, safeName);
     
+    // Ensure local uploads directory exists
     if (!fs.existsSync(UPLOADS_DIR)) {
       fs.mkdirSync(UPLOADS_DIR, { recursive: true });
     }
 
+    // Always save a local copy to ensure server-side fallback serving is guaranteed
     fs.writeFileSync(destPath, buffer);
     
-    if (db) {
+    let fileUrl = "";
+    let uploadedToStorage = false;
+
+    // Determine absolute fallback URL in case Firebase Storage is not connected or fails
+    // This ensures that even if it falls back to Render local uploads, Vercel frontend can still access them absolutely!
+    const protocol = req.headers['x-forwarded-proto'] || 'https';
+    const fallbackUrl = `${protocol}://${req.headers.host}/uploads/${safeName}`;
+    fileUrl = fallbackUrl;
+
+    // Prioritize Firebase Storage upload for global persistent access from external frontends (e.g., Vercel)
+    if (firebaseApp) {
       try {
+        const storageBucket = process.env.FIREBASE_STORAGE_BUCKET || "future-audio-ndpgw.firebasestorage.app";
+        const storage = getStorage(firebaseApp);
+        const bucket = storage.bucket(storageBucket);
+        const fileRef = bucket.file(`uploads/${safeName}`);
+
+        // Generate a long-lived unauthenticated access token (identical to how Firebase Console generates links)
+        const downloadToken = crypto.randomBytes(16).toString("hex");
+
+        await fileRef.save(buffer, {
+          metadata: {
+            contentType: contentType || "image/jpeg",
+            metadata: {
+              firebaseStorageDownloadTokens: downloadToken
+            }
+          },
+          resumable: false
+        });
+
+        // Generate public-facing standard direct access URL for unauthenticated reads
+        const encodedPath = encodeURIComponent(`uploads/${safeName}`);
+        fileUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodedPath}?alt=media&token=${downloadToken}`;
+        uploadedToStorage = true;
+        console.log(`[Firebase Storage] Uploaded file ${safeName} successfully. Tokenized URL: ${fileUrl}`);
+      } catch (storageErr: any) {
+        console.warn("[Firebase Storage] Could not upload to Firebase Storage, falling back to local/Firestore dual system:", storageErr?.message || storageErr);
+      }
+    }
+
+    // Dual-write: Store in Firestore for persistent recovery across ephemeral server lifecycles if storage didn't run or failed
+    if (!uploadedToStorage && db) {
+      try {
+        // If the image is small enough (under 950KB after base64), save to Firestore
         const base64Length = cleanBase64.length;
         if (base64Length < 950 * 1024) {
           await db.collection("uploaded_files").doc(safeName).set({
@@ -802,7 +959,7 @@ app.post("/api/admin/upload", async (req, res) => {
       }
     }
 
-    const fileUrl = `/uploads/${safeName}`;
+    // Return accessible URL path (either Firebase Storage URL or local uploads fallback path)
     res.json({ success: true, fileUrl, filename: safeName });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
