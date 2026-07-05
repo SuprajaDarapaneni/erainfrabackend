@@ -4,11 +4,21 @@ import fs from "fs";
 import cors from "cors";
 import dotenv from "dotenv";
 import crypto from "crypto";
-import { initializeApp, cert } from "firebase-admin/app";
-import { getFirestore } from "firebase-admin/firestore";
-import { getStorage } from "firebase-admin/storage";
+import mongoose from "mongoose";
+import { v2 as cloudinary } from "cloudinary";
+import {
+  CompanyDetails,
+  Project,
+  LifestyleAmenity,
+  Testimonial,
+  GalleryItem,
+  Inquiry,
+  RecentActivity,
+  SeoSettings,
+  DownloadCount
+} from "./models.js";
 
-// Load environment variables from .env file if it exists
+// Load environment variables
 dotenv.config();
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -24,7 +34,7 @@ if (!fs.existsSync(UPLOADS_DIR)) {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 }
 
-// Initial data schema loaded if STORE_FILE doesn't exist
+// Initial data schema loaded if database is empty
 const INITIAL_DATA = {
   companyDetails: {
     name: "ERA INFRA DEVELOPERS",
@@ -319,53 +329,129 @@ const INITIAL_DATA = {
   downloadCount: 42
 };
 
-let db: any = null;
-let firebaseApp: any = null;
 let storeInMemory: any = null;
 
-try {
-  const saEnv = process.env.FIREBASE_SERVICE_ACCOUNT;
-  const storageBucket = process.env.FIREBASE_STORAGE_BUCKET || "future-audio-ndpgw.firebasestorage.app";
+// Initialize Cloudinary
+if (process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET) {
+  cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET
+  });
+  console.log("[Cloudinary] Standalone Credentials initialized successfully.");
+} else {
+  console.warn("[Cloudinary] Credentials missing in environment variables. Standalone uploads will fall back to local disk.");
+}
 
-  if (saEnv) {
-    try {
-      let saJson: any;
-      const trimmed = saEnv.trim();
-      if (trimmed.startsWith("{")) {
-        saJson = JSON.parse(trimmed);
-      } else {
-        const decoded = Buffer.from(trimmed, "base64").toString("utf8");
-        saJson = JSON.parse(decoded);
-      }
-      firebaseApp = initializeApp({
-        credential: cert(saJson),
-        projectId: saJson.project_id || "future-audio-ndpgw",
-        storageBucket: storageBucket
+// Connect to MongoDB
+const mongoUri = process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/era-infra";
+console.log("[MongoDB] Standalone server connecting to database...");
+mongoose.connect(mongoUri)
+  .then(() => {
+    console.log("[MongoDB] Standalone server connected to database successfully.");
+  })
+  .catch((err) => {
+    console.error("[MongoDB] Standalone server connection error:", err);
+  });
+
+// Helper to save all keys to MongoDB in background
+async function saveToMongoAll(data: typeof INITIAL_DATA) {
+  if (mongoose.connection.readyState !== 1) {
+    console.warn("[MongoDB] Database connection is not ready. Skipping cloud write-back.");
+    return;
+  }
+  try {
+    // 1. CompanyDetails (upsert single document)
+    const companyObj = JSON.parse(JSON.stringify(data.companyDetails || {}));
+    delete companyObj._id;
+    delete companyObj.__v;
+    await CompanyDetails.findOneAndUpdate({}, companyObj, { upsert: true, new: true });
+
+    // 2. Projects (bulk replace)
+    await Project.deleteMany({});
+    if (data.projects && data.projects.length > 0) {
+      const cleanProjects = data.projects.map((p: any) => {
+        const cp = { ...p };
+        delete cp._id;
+        delete cp.__v;
+        return cp;
       });
-      console.log("[Firebase] Admin SDK connected using custom FIREBASE_SERVICE_ACCOUNT environment variable.");
-    } catch (parseErr) {
-      console.error("[Firebase] Error parsing custom service account environment variable:", parseErr);
+      await Project.insertMany(cleanProjects);
     }
+
+    // 3. LifestyleAmenities
+    await LifestyleAmenity.deleteMany({});
+    if (data.lifestyleAmenities && data.lifestyleAmenities.length > 0) {
+      const cleanAmenities = data.lifestyleAmenities.map((a: any) => {
+        const ca = { ...a };
+        delete ca._id;
+        delete ca.__v;
+        return ca;
+      });
+      await LifestyleAmenity.insertMany(cleanAmenities);
+    }
+
+    // 4. Testimonials
+    await Testimonial.deleteMany({});
+    if (data.testimonials && data.testimonials.length > 0) {
+      const cleanTestimonials = data.testimonials.map((t: any) => {
+        const ct = { ...t };
+        delete ct._id;
+        delete ct.__v;
+        return ct;
+      });
+      await Testimonial.insertMany(cleanTestimonials);
+    }
+
+    // 5. GalleryItems
+    await GalleryItem.deleteMany({});
+    if (data.galleryItems && data.galleryItems.length > 0) {
+      const cleanGallery = data.galleryItems.map((g: any) => {
+        const cg = { ...g };
+        delete cg._id;
+        delete cg.__v;
+        return cg;
+      });
+      await GalleryItem.insertMany(cleanGallery);
+    }
+
+    // 6. Inquiries
+    await Inquiry.deleteMany({});
+    if (data.inquiries && data.inquiries.length > 0) {
+      const cleanInquiries = data.inquiries.map((i: any) => {
+        const ci = { ...i };
+        delete ci._id;
+        delete ci.__v;
+        return ci;
+      });
+      await Inquiry.insertMany(cleanInquiries);
+    }
+
+    // 7. RecentActivities
+    await RecentActivity.deleteMany({});
+    if (data.recentActivities && data.recentActivities.length > 0) {
+      const cleanActivities = data.recentActivities.map((act: any) => {
+        const cact = { ...act };
+        delete cact._id;
+        delete cact.__v;
+        return cact;
+      });
+      await RecentActivity.insertMany(cleanActivities);
+    }
+
+    // 8. SeoSettings
+    const seoObj = JSON.parse(JSON.stringify(data.seoSettings || {}));
+    delete seoObj._id;
+    delete seoObj.__v;
+    await SeoSettings.findOneAndUpdate({}, seoObj, { upsert: true, new: true });
+
+    // 9. DownloadCount
+    await DownloadCount.findOneAndUpdate({}, { count: data.downloadCount !== undefined ? data.downloadCount : 42 }, { upsert: true, new: true });
+
+    console.log("[MongoDB] Standalone database collections synced successfully in background.");
+  } catch (err) {
+    console.error("[MongoDB] Error saving to standalone MongoDB collections:", err);
   }
-
-  if (!firebaseApp) {
-    firebaseApp = initializeApp({
-      projectId: "future-audio-ndpgw",
-      storageBucket: storageBucket
-    });
-    console.log("[Firebase] Admin SDK connected using default application credentials.");
-  }
-
-  // Determine dynamic database ID:
-  // Standard standalone Firebase/GCP setups use "(default)".
-  // AI Studio workspace environment uses "ai-studio-erainfradevelope-fe3636c6-24f9-40c9-8d99-f86c21872188".
-  const databaseId = process.env.FIREBASE_DATABASE_ID || 
-    (process.env.FIREBASE_SERVICE_ACCOUNT ? "(default)" : "ai-studio-erainfradevelope-fe3636c6-24f9-40c9-8d99-f86c21872188");
-
-  db = getFirestore(firebaseApp, databaseId);
-  console.log(`[Firebase] Admin SDK connected to Firestore database "${databaseId}" successfully.`);
-} catch (err) {
-  console.warn("[Firebase] Could not initialize Admin SDK dynamically, falling back to local file storage mode:", err);
 }
 
 // Memory Cache Helpers
@@ -397,82 +483,89 @@ function saveStoreData(data: any) {
     console.error("Failed to write offline store file data:", err);
   }
 
-  if (db) {
-    const backupKeys = [
-      "companyDetails",
-      "projects",
-      "lifestyleAmenities",
-      "testimonials",
-      "galleryItems",
-      "inquiries",
-      "recentActivities",
-      "seoSettings",
-      "downloadCount"
-    ];
-
-    backupKeys.forEach(async (key) => {
-      try {
-        // Write to site_store
-        const docRef = db.collection("site_store").doc(key);
-        // Write to era_config
-        const docRefNew = db.collection("era_config").doc(key);
-
-        const val = key === "companyDetails" ? (data.companyDetails || {})
-                  : key === "seoSettings" ? (data.seoSettings || {})
-                  : key === "downloadCount" ? ({ value: data.downloadCount !== undefined ? data.downloadCount : 42 })
-                  : ({ list: data[key] || [] });
-
-        await docRef.set(val);
-        await docRefNew.set(val);
-      } catch (err) {
-        console.error(`[Firebase] Failed to write document key ${key}:`, err);
-      }
+  if (mongoose.connection.readyState === 1) {
+    saveToMongoAll(data).catch((err) => {
+      console.error("[MongoDB] Background MongoDB sync failed:", err);
     });
   }
 }
 
-// Auto-Sync with Firestore on startup
-async function syncFromFirestore() {
-  if (db) {
-    try {
-      console.log("[Firebase] Syncing latest state from cloud database Firestore...");
-      let collRef = db.collection("era_config");
-      let snapshot = await collRef.get();
-      
-      // Fallback to site_store if era_config is empty
-      if (snapshot.empty) {
-        console.log("[Firebase] Collection 'era_config' is empty. Trying fallback collection 'site_store'...");
-        collRef = db.collection("site_store");
-        snapshot = await collRef.get();
-      }
-
-      if (!snapshot.empty) {
-        const loadedData: any = {};
-        snapshot.forEach((doc: any) => {
-          loadedData[doc.id] = doc.data();
+// Preload site data from MongoDB on Startup
+async function syncFromMongo() {
+  try {
+    console.log("[MongoDB] Pre-loading site data from MongoDB...");
+    if (mongoose.connection.readyState !== 1) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(() => {
+          console.warn("[MongoDB] Connection timeout during startup. Proceeding with local store.");
+          resolve();
+        }, 2000);
+        mongoose.connection.once("connected", () => {
+          clearTimeout(timer);
+          resolve();
         });
+      });
+    }
 
+    if (mongoose.connection.readyState === 1) {
+      console.log("[MongoDB] Connection open. Loading collections...");
+      const company = await CompanyDetails.findOne().lean();
+      const projects = await Project.find().lean();
+      const amenities = await LifestyleAmenity.find().lean();
+      const testimonials = await Testimonial.find().lean();
+      const gallery = await GalleryItem.find().lean();
+      const inquiries = await Inquiry.find().lean();
+      const activities = await RecentActivity.find().lean();
+      const seo = await SeoSettings.findOne().lean();
+      const downloads = await DownloadCount.findOne().lean();
+
+      if (!company && projects.length === 0) {
+        console.log("[MongoDB] Database is empty. Seeding with default data...");
+        const initial = getStoreData();
+        await saveToMongoAll(initial);
+      } else {
         const current = getStoreData();
-        if (loadedData.companyDetails) current.companyDetails = loadedData.companyDetails;
-        if (loadedData.projects) current.projects = loadedData.projects.list || [];
-        if (loadedData.lifestyleAmenities) current.lifestyleAmenities = loadedData.lifestyleAmenities.list || [];
-        if (loadedData.testimonials) current.testimonials = loadedData.testimonials.list || [];
-        if (loadedData.galleryItems) current.galleryItems = loadedData.galleryItems.list || [];
-        if (loadedData.inquiries) current.inquiries = loadedData.inquiries.list || [];
-        if (loadedData.recentActivities) current.recentActivities = loadedData.recentActivities.list || [];
-        if (loadedData.seoSettings) current.seoSettings = loadedData.seoSettings;
-        if (loadedData.downloadCount) current.downloadCount = loadedData.downloadCount.value !== undefined ? loadedData.downloadCount.value : 42;
+        
+        if (company) {
+          const { _id, __v, createdAt, updatedAt, ...cleanCompany } = company as any;
+          current.companyDetails = cleanCompany;
+        }
+        if (projects && projects.length > 0) {
+          current.projects = projects.map(({ _id, __v, createdAt, updatedAt, ...rest }: any) => rest);
+        }
+        if (amenities && amenities.length > 0) {
+          current.lifestyleAmenities = amenities.map(({ _id, __v, createdAt, updatedAt, ...rest }: any) => rest);
+        }
+        if (testimonials && testimonials.length > 0) {
+          current.testimonials = testimonials.map(({ _id, __v, createdAt, updatedAt, ...rest }: any) => rest);
+        }
+        if (gallery && gallery.length > 0) {
+          current.galleryItems = gallery.map(({ _id, __v, createdAt, updatedAt, ...rest }: any) => rest);
+        }
+        if (inquiries && inquiries.length > 0) {
+          current.inquiries = inquiries.map(({ _id, __v, createdAt, updatedAt, ...rest }: any) => rest);
+        }
+        if (activities && activities.length > 0) {
+          current.recentActivities = activities.map(({ _id, __v, createdAt, updatedAt, ...rest }: any) => rest);
+        }
+        if (seo) {
+          const { _id, __v, createdAt, updatedAt, ...cleanSeo } = seo as any;
+          current.seoSettings = cleanSeo;
+        }
+        if (downloads) {
+          current.downloadCount = downloads.count;
+        }
         
         storeInMemory = current;
-        console.log("[Firebase] Successfully loaded site data from cloud Firestore.");
+        console.log("[MongoDB] Successfully loaded site data from cloud MongoDB database.");
       }
-    } catch (err) {
-      console.error("[Firebase] Error during pre-loading from Firestore:", err);
     }
+  } catch (err) {
+    console.error("[MongoDB] Error during pre-loading from MongoDB:", err);
   }
 }
 
-syncFromFirestore();
+syncFromMongo();
 
 // Express App Configuration
 const app = express();
@@ -481,7 +574,7 @@ app.use(cors());
 app.use(express.json({ limit: "15mb" }));
 app.use(express.urlencoded({ extended: true, limit: "15mb" }));
 
-// Route to serve uploads with Firestore recovery
+// Route to serve uploads
 app.get("/uploads/:filename", async (req, res) => {
   try {
     const { filename } = req.params;
@@ -491,30 +584,9 @@ app.get("/uploads/:filename", async (req, res) => {
       return res.sendFile(destPath);
     }
 
-    if (db) {
-      console.log(`[Firebase] File ${filename} not on disk, recovering from Firestore...`);
-      const docRef = db.collection("uploaded_files").doc(filename);
-      const docSnap = await docRef.get();
-      if (docSnap.exists) {
-        const fileData = docSnap.data();
-        if (fileData && fileData.base64Data) {
-          const cleanBase64 = fileData.base64Data.replace(/^data:.+;base64,/, "");
-          const buffer = Buffer.from(cleanBase64, "base64");
-          
-          if (!fs.existsSync(UPLOADS_DIR)) {
-            fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-          }
-          
-          fs.writeFileSync(destPath, buffer);
-          console.log(`[Firebase] File ${filename} recovered and cached to disk.`);
-          return res.sendFile(destPath);
-        }
-      }
-    }
-
     res.status(404).send("File not found");
   } catch (err: any) {
-    console.error("[Firebase] Error recovering file:", err);
+    console.error("[Uploads] Error serving file:", err);
     res.status(500).send("Internal Server Error");
   }
 });
@@ -523,7 +595,7 @@ app.get("/uploads/:filename", async (req, res) => {
 app.get("/", (req, res) => {
   res.json({
     status: "online",
-    message: "Era Infra Standalone API Backend is running perfectly.",
+    message: "Era Infra Standalone API Backend with MongoDB & Cloudinary is running perfectly.",
     timestamp: new Date().toISOString(),
     endpoints: {
       health: "/api/health",
@@ -641,68 +713,29 @@ app.post("/api/admin/login", (req, res) => {
 // Database and storage connectivity diagnostic check API
 app.get("/api/admin/db-status", async (req, res) => {
   try {
-    const saEnvExists = !!process.env.FIREBASE_SERVICE_ACCOUNT;
-    const databaseId = process.env.FIREBASE_DATABASE_ID || 
-      (process.env.FIREBASE_SERVICE_ACCOUNT ? "(default)" : "ai-studio-erainfradevelope-fe3636c6-24f9-40c9-8d99-f86c21872188");
-    const storageBucket = process.env.FIREBASE_STORAGE_BUCKET || "future-audio-ndpgw.firebasestorage.app";
+    const mongoState = mongoose.connection.readyState;
+    let mongoStatus = "Disconnected";
+    if (mongoState === 1) mongoStatus = "Connected (Read/Write OK)";
+    else if (mongoState === 2) mongoStatus = "Connecting...";
+    else if (mongoState === 3) mongoStatus = "Disconnecting...";
     
-    let firestoreStatus = "Not Connected";
-    let firestoreError = null;
-    let testWriteSuccess = false;
-    let documentCount = 0;
-
-    if (db) {
-      try {
-        const testDocRef = db.collection("uploaded_files_test").doc("connection_check");
-        await testDocRef.set({
-          timestamp: new Date(),
-          sender: "AI Studio Diagnostic System"
-        });
-        
-        testWriteSuccess = true;
-        firestoreStatus = "Connected (Read/Write OK)";
-        
-        const snap = await db.collection("uploaded_files").limit(5).get();
-        documentCount = snap.size;
-      } catch (dbErr: any) {
-        firestoreStatus = "Connected but Permission/Auth Error";
-        firestoreError = dbErr?.message || dbErr;
-      }
-    }
-
-    let storageStatus = "Not Connected";
-    let storageError = null;
-    if (firebaseApp) {
-      try {
-        const storage = getStorage(firebaseApp);
-        const bucket = storage.bucket(storageBucket);
-        const [exists] = await bucket.exists();
-        if (exists) {
-          storageStatus = `Connected (${storageBucket})`;
-        } else {
-          storageStatus = `Bucket does not exist (${storageBucket})`;
-        }
-      } catch (storErr: any) {
-        storageStatus = "Configuration/Auth Error";
-        storageError = storErr?.message || storErr;
-      }
+    const cloudinaryConfigured = !!(process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET);
+    
+    let cloudinaryStatus = "Not Configured";
+    if (cloudinaryConfigured) {
+      cloudinaryStatus = `Configured (Cloud Name: ${process.env.CLOUDINARY_CLOUD_NAME})`;
     }
 
     res.json({
       success: true,
-      firebaseInitialized: !!firebaseApp,
-      saEnvExists,
-      databaseId,
-      storageBucket,
-      firestore: {
-        status: firestoreStatus,
-        error: firestoreError,
-        testWriteSuccess,
-        sampleFilesCount: documentCount
+      mongodb: {
+        status: mongoStatus,
+        readyState: mongoState,
+        uri: process.env.MONGODB_URI ? "Configured" : "Not Configured"
       },
-      storage: {
-        status: storageStatus,
-        error: storageError
+      cloudinary: {
+        status: cloudinaryStatus,
+        configured: cloudinaryConfigured
       },
       localUploads: {
         path: UPLOADS_DIR,
@@ -883,83 +916,48 @@ app.post("/api/admin/upload", async (req, res) => {
       return res.status(400).json({ error: "Filename and base64Data fields are required." });
     }
 
-    // Strip metadata prefixes if present (handles any file type MIME formatting)
     const cleanBase64 = base64Data.replace(/^data:.+;base64,/, "");
     const buffer = Buffer.from(cleanBase64, "base64");
     
-    // Sanitise filename to fit clean paths
     const safeName = Date.now() + "_" + filename.replace(/[^a-zA-Z0-9.\-_]/g, "");
     const destPath = path.join(UPLOADS_DIR, safeName);
     
-    // Ensure local uploads directory exists
     if (!fs.existsSync(UPLOADS_DIR)) {
       fs.mkdirSync(UPLOADS_DIR, { recursive: true });
     }
 
-    // Always save a local copy to ensure server-side fallback serving is guaranteed
     fs.writeFileSync(destPath, buffer);
     
     let fileUrl = "";
-    let uploadedToStorage = false;
-
-    // Determine absolute fallback URL in case Firebase Storage is not connected or fails
-    // This ensures that even if it falls back to Render local uploads, Vercel frontend can still access them absolutely!
     const protocol = req.headers['x-forwarded-proto'] || 'https';
     const fallbackUrl = `${protocol}://${req.headers.host}/uploads/${safeName}`;
     fileUrl = fallbackUrl;
 
-    // Prioritize Firebase Storage upload for global persistent access from external frontends (e.g., Vercel)
-    if (firebaseApp) {
+    const cloudinaryConfigured = !!(process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET);
+    if (cloudinaryConfigured) {
       try {
-        const storageBucket = process.env.FIREBASE_STORAGE_BUCKET || "future-audio-ndpgw.firebasestorage.app";
-        const storage = getStorage(firebaseApp);
-        const bucket = storage.bucket(storageBucket);
-        const fileRef = bucket.file(`uploads/${safeName}`);
+        let uploadInput = base64Data;
+        if (!uploadInput.startsWith("data:")) {
+          const mime = contentType || "image/jpeg";
+          uploadInput = `data:${mime};base64,${base64Data}`;
+        }
 
-        // Generate a long-lived unauthenticated access token (identical to how Firebase Console generates links)
-        const downloadToken = crypto.randomBytes(16).toString("hex");
-
-        await fileRef.save(buffer, {
-          metadata: {
-            contentType: contentType || "image/jpeg",
-            metadata: {
-              firebaseStorageDownloadTokens: downloadToken
-            }
-          },
-          resumable: false
+        console.log(`[Cloudinary] Standalone uploading ${safeName} to Cloudinary...`);
+        const result = await cloudinary.uploader.upload(uploadInput, {
+          folder: "era_infra",
+          public_id: path.parse(safeName).name,
+          resource_type: "auto"
         });
 
-        // Generate public-facing standard direct access URL for unauthenticated reads
-        const encodedPath = encodeURIComponent(`uploads/${safeName}`);
-        fileUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodedPath}?alt=media&token=${downloadToken}`;
-        uploadedToStorage = true;
-        console.log(`[Firebase Storage] Uploaded file ${safeName} successfully. Tokenized URL: ${fileUrl}`);
-      } catch (storageErr: any) {
-        console.warn("[Firebase Storage] Could not upload to Firebase Storage, falling back to local/Firestore dual system:", storageErr?.message || storageErr);
-      }
-    }
-
-    // Dual-write: Store in Firestore for persistent recovery across ephemeral server lifecycles if storage didn't run or failed
-    if (!uploadedToStorage && db) {
-      try {
-        // If the image is small enough (under 950KB after base64), save to Firestore
-        const base64Length = cleanBase64.length;
-        if (base64Length < 950 * 1024) {
-          await db.collection("uploaded_files").doc(safeName).set({
-            base64Data: cleanBase64,
-            contentType: contentType || "image/jpeg",
-            uploadedAt: new Date().toISOString()
-          });
-          console.log(`[Firebase] File ${safeName} successfully persisted in Firestore.`);
-        } else {
-          console.warn(`[Firebase] File ${safeName} is too large (${Math.round(base64Length/1024)}KB) to persist in Firestore, saving to local disk only.`);
+        if (result && result.secure_url) {
+          fileUrl = result.secure_url;
+          console.log(`[Cloudinary] Standalone upload successful! URL: ${fileUrl}`);
         }
-      } catch (dbErr) {
-        console.error("[Firebase] Error persisting uploaded file to Firestore:", dbErr);
+      } catch (cloudinaryErr: any) {
+        console.warn("[Cloudinary] Standalone upload failed, falling back to local files:", cloudinaryErr?.message || cloudinaryErr);
       }
     }
 
-    // Return accessible URL path (either Firebase Storage URL or local uploads fallback path)
     res.json({ success: true, fileUrl, filename: safeName });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -1052,24 +1050,24 @@ app.post("/api/admin/testimonials", (req, res) => {
   try {
     const { name, role, content, rating, avatar, projectPurchased } = req.body;
     if (!name || !content) {
-      return res.status(400).json({ error: "Customer name and feedback are required." });
+      return res.status(400).json({ error: "Name and content are required parameters." });
     }
 
     const store = getStoreData();
-    const newTest = {
-      id: "t" + Date.now(),
+    const newTestimonial = {
+      id: "t-" + Date.now(),
       name,
-      role: role || "Homeowner",
+      role: role || "Customer",
       content,
       rating: Number(rating) || 5,
       avatar: avatar || "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=150&q=80",
-      projectPurchased: projectPurchased || "ERA Emerald Country Resort & Villas",
+      projectPurchased: projectPurchased || "Green Gold Valley",
       hidden: false
     };
 
-    store.testimonials.push(newTest);
+    store.testimonials.push(newTestimonial);
     saveStoreData(store);
-    res.status(201).json({ success: true, testimonial: newTest });
+    res.status(201).json({ success: true, testimonial: newTestimonial });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -1078,7 +1076,7 @@ app.post("/api/admin/testimonials", (req, res) => {
 app.put("/api/admin/testimonials/:id", (req, res) => {
   try {
     const { id } = req.params;
-    const { hidden, name, role, content, rating, avatar, projectPurchased } = req.body;
+    const { name, role, content, rating, avatar, projectPurchased, hidden } = req.body;
     const store = getStoreData();
 
     const index = store.testimonials.findIndex((t: any) => t.id === id);
@@ -1086,13 +1084,13 @@ app.put("/api/admin/testimonials/:id", (req, res) => {
       return res.status(404).json({ error: "Testimonial not found." });
     }
 
-    if (hidden !== undefined) store.testimonials[index].hidden = !!hidden;
     if (name !== undefined) store.testimonials[index].name = name;
     if (role !== undefined) store.testimonials[index].role = role;
     if (content !== undefined) store.testimonials[index].content = content;
     if (rating !== undefined) store.testimonials[index].rating = Number(rating);
     if (avatar !== undefined) store.testimonials[index].avatar = avatar;
     if (projectPurchased !== undefined) store.testimonials[index].projectPurchased = projectPurchased;
+    if (hidden !== undefined) store.testimonials[index].hidden = !!hidden;
 
     saveStoreData(store);
     res.json({ success: true, testimonial: store.testimonials[index] });
@@ -1117,16 +1115,16 @@ app.post("/api/admin/gallery", (req, res) => {
   try {
     const { title, category, image, projectId } = req.body;
     if (!image) {
-      return res.status(400).json({ error: "Image source link is mandatory." });
+      return res.status(400).json({ error: "Image URL is required for gallery." });
     }
 
     const store = getStoreData();
     const newItem = {
-      id: "g" + Date.now(),
-      title: title || "Site photo",
+      id: "gallery-" + Date.now(),
+      title: title || "Gallery Image",
       category: category || "site",
       image,
-      projectId: projectId || ""
+      projectId: projectId || "era-green-gold-valley"
     };
 
     store.galleryItems.push(newItem);
@@ -1153,23 +1151,17 @@ app.put("/api/admin/gallery/:id", (req, res) => {
   try {
     const { id } = req.params;
     const { title, category, image, projectId } = req.body;
-    if (!image) {
-      return res.status(400).json({ error: "Image source link is mandatory." });
-    }
-
     const store = getStoreData();
+
     const index = store.galleryItems.findIndex((g: any) => g.id === id);
     if (index === -1) {
       return res.status(404).json({ error: "Gallery item not found." });
     }
 
-    store.galleryItems[index] = {
-      ...store.galleryItems[index],
-      title: title || store.galleryItems[index].title,
-      category: category || store.galleryItems[index].category,
-      image,
-      projectId: projectId !== undefined ? projectId : store.galleryItems[index].projectId
-    };
+    if (title !== undefined) store.galleryItems[index].title = title;
+    if (category !== undefined) store.galleryItems[index].category = category;
+    if (image !== undefined) store.galleryItems[index].image = image;
+    if (projectId !== undefined) store.galleryItems[index].projectId = projectId;
 
     saveStoreData(store);
     res.json({ success: true, galleryItem: store.galleryItems[index] });
@@ -1180,20 +1172,15 @@ app.put("/api/admin/gallery/:id", (req, res) => {
 
 app.put("/api/admin/seo", (req, res) => {
   try {
-    const { home, about, projects, contact } = req.body;
+    const seoData = req.body;
     const store = getStoreData();
 
-    if (home) store.seoSettings.home = { ...store.seoSettings.home, ...home };
-    if (about) store.seoSettings.about = { ...store.seoSettings.about, ...about };
-    if (projects) store.seoSettings.projects = { ...store.seoSettings.projects, ...projects };
-    if (contact) store.seoSettings.contact = { ...store.seoSettings.contact, ...contact };
-
-    store.recentActivities.unshift({
-      id: "act-" + Date.now(),
-      text: "SEO Metatags and custom rankings saved successfully",
-      type: "system",
-      timestamp: new Date().toISOString()
-    });
+    store.seoSettings = {
+      home: seoData.home || store.seoSettings.home,
+      about: seoData.about || store.seoSettings.about,
+      projects: seoData.projects || store.seoSettings.projects,
+      contact: seoData.contact || store.seoSettings.contact
+    };
 
     saveStoreData(store);
     res.json({ success: true, seoSettings: store.seoSettings });
