@@ -56,3 +56,4 @@ When you deploy your frontend to Vercel, simply define the API Base environment 
 3. Redeploy your frontend on Vercel to apply the changes.
 
 The frontend is programmed to intercept all outgoing API requests and route them automatically to your backend URL!
+ 
