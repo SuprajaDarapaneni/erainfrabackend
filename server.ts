@@ -343,6 +343,83 @@ if (process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && proce
   console.warn("[Cloudinary] Credentials missing in environment variables. Standalone uploads will fall back to local disk.");
 }
 
+// Helpers for Cloudinary integration to fetch and manage gallery items directly in Cloudinary
+function getPublicIdFromUrl(url: string): string | null {
+  if (!url || !url.includes("cloudinary.com")) return null;
+  try {
+    const parts = url.split("/upload/");
+    if (parts.length < 2) return null;
+    
+    const pathAfterUpload = parts[1];
+    const cleanPath = pathAfterUpload.replace(/^v\d+\//, "");
+    
+    const lastDotIndex = cleanPath.lastIndexOf(".");
+    const publicId = lastDotIndex !== -1 ? cleanPath.substring(0, lastDotIndex) : cleanPath;
+    
+    return publicId;
+  } catch (err) {
+    console.error("Failed to parse public ID from URL:", url, err);
+    return null;
+  }
+}
+
+async function fetchGalleryFromCloudinary(): Promise<any[]> {
+  const cloudinaryConfigured = !!(process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET);
+  if (!cloudinaryConfigured) {
+    console.warn("[Cloudinary] Credentials missing. Returning empty gallery.");
+    return [];
+  }
+
+  try {
+    console.log("[Cloudinary] Fetching resources from Cloudinary with prefix 'era_infra/'...");
+    let result = await cloudinary.api.resources({
+      type: "upload",
+      prefix: "era_infra/",
+      context: true,
+      max_results: 100
+    });
+
+    if (!result || !result.resources || result.resources.length === 0) {
+      console.log("[Cloudinary] No resources found with prefix 'era_infra/'. Trying all upload resources...");
+      result = await cloudinary.api.resources({
+        type: "upload",
+        context: true,
+        max_results: 100
+      });
+    }
+
+    if (result && result.resources) {
+      console.log(`[Cloudinary] Found ${result.resources.length} resources.`);
+      return result.resources.map((resource: any) => {
+        let title = "Site View";
+        let category = "site";
+        let projectId = "";
+
+        if (resource.context && resource.context.custom) {
+          title = resource.context.custom.title || title;
+          category = resource.context.custom.category || category;
+          projectId = resource.context.custom.projectId || projectId;
+        } else if (resource.context) {
+          title = resource.context.title || title;
+          category = resource.context.category || category;
+          projectId = resource.context.projectId || projectId;
+        }
+
+        return {
+          id: resource.public_id,
+          title: title,
+          category: category,
+          image: resource.secure_url,
+          projectId: projectId
+        };
+      });
+    }
+  } catch (err: any) {
+    console.error("[Cloudinary] Failed to fetch gallery resources:", err.message || err);
+  }
+  return [];
+}
+
 // Connect to MongoDB
 const mongoUri = process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/era-infra";
 console.log("[MongoDB] Standalone server connecting to database...");
@@ -609,9 +686,17 @@ app.get("/api/health", (req, res) => {
   res.json({ status: "ok", time: new Date().toISOString() });
 });
 
-app.get("/api/site-data", (req, res) => {
-  const data = getStoreData();
-  res.json(data);
+app.get("/api/site-data", async (req, res) => {
+  try {
+    const data = getStoreData();
+    const liveGallery = await fetchGalleryFromCloudinary();
+    if (liveGallery && liveGallery.length > 0) {
+      data.galleryItems = liveGallery;
+    }
+    res.json(data);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.post("/api/inquiries", (req, res) => {
@@ -1111,64 +1196,134 @@ app.delete("/api/admin/testimonials/:id", (req, res) => {
   }
 });
 
-app.post("/api/admin/gallery", (req, res) => {
+// Helper to format Cloudinary context string safely
+function formatCloudinaryContextString(title: any, category: any, projectId: any): string {
+  const cleanTitle = String(title || "Gallery Image").replace(/[|=]/g, " ");
+  const cleanCategory = String(category || "site").replace(/[|=]/g, " ");
+  const cleanProjectId = String(projectId || "").replace(/[|=]/g, " ");
+  return `title=${cleanTitle}|category=${cleanCategory}|projectId=${cleanProjectId}`;
+}
+
+// Shared handlers for gallery integration using direct Cloudinary storage
+const handleGetGallery = async (req: express.Request, res: express.Response) => {
+  try {
+    const items = await fetchGalleryFromCloudinary();
+    res.json({ success: true, galleryItems: items });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+const handlePostGallery = async (req: express.Request, res: express.Response) => {
   try {
     const { title, category, image, projectId } = req.body;
     if (!image) {
-      return res.status(400).json({ error: "Image URL is required for gallery." });
+      return res.status(400).json({ error: "Image source link is mandatory." });
     }
 
-    const store = getStoreData();
-    const newItem = {
-      id: "gallery-" + Date.now(),
-      title: title || "Gallery Image",
-      category: category || "site",
-      image,
-      projectId: projectId || "era-green-gold-valley"
-    };
+    let finalImageUrl = image;
+    let publicId = getPublicIdFromUrl(image);
 
-    store.galleryItems.push(newItem);
-    saveStoreData(store);
-    res.status(201).json({ success: true, galleryItem: newItem });
+    const cloudinaryConfigured = !!(process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET);
+
+    if (cloudinaryConfigured) {
+      if (image.startsWith("data:")) {
+        const safeName = "gallery_" + Date.now();
+        console.log(`[Cloudinary] Uploading base64 image ${safeName} directly to Cloudinary...`);
+        const result = await cloudinary.uploader.upload(image, {
+          folder: "era_infra",
+          public_id: safeName,
+          resource_type: "auto",
+          context: formatCloudinaryContextString(title, category, projectId)
+        });
+        if (result && result.secure_url) {
+          finalImageUrl = result.secure_url;
+          publicId = result.public_id;
+        }
+      } else if (publicId) {
+        console.log(`[Cloudinary] Updating metadata for public ID ${publicId} directly in Cloudinary...`);
+        await cloudinary.uploader.add_context(
+          formatCloudinaryContextString(title, category, projectId),
+          [publicId]
+        );
+      }
+    }
+
+    res.status(201).json({
+      success: true,
+      galleryItem: {
+        id: publicId || "gallery-" + Date.now(),
+        title: title || "Gallery Image",
+        category: category || "site",
+        image: finalImageUrl,
+        projectId: projectId || ""
+      }
+    });
   } catch (err: any) {
+    console.error("[Cloudinary] Gallery POST error:", err);
     res.status(500).json({ error: err.message });
   }
-});
+};
 
-app.delete("/api/admin/gallery/:id", (req, res) => {
-  try {
-    const { id } = req.params;
-    const store = getStoreData();
-    store.galleryItems = store.galleryItems.filter((g: any) => g.id !== id);
-    saveStoreData(store);
-    res.json({ success: true });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.put("/api/admin/gallery/:id", (req, res) => {
+const handlePutGallery = async (req: express.Request, res: express.Response) => {
   try {
     const { id } = req.params;
     const { title, category, image, projectId } = req.body;
-    const store = getStoreData();
 
-    const index = store.galleryItems.findIndex((g: any) => g.id === id);
-    if (index === -1) {
-      return res.status(404).json({ error: "Gallery item not found." });
+    const cloudinaryConfigured = !!(process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET);
+
+    if (cloudinaryConfigured && id && !id.startsWith("gallery-bulk") && !id.startsWith("gallery-")) {
+      console.log(`[Cloudinary] Updating context for resource ${id} directly in Cloudinary...`);
+      await cloudinary.uploader.add_context(
+        formatCloudinaryContextString(title, category, projectId),
+        [id]
+      );
     }
 
-    if (title !== undefined) store.galleryItems[index].title = title;
-    if (category !== undefined) store.galleryItems[index].category = category;
-    if (image !== undefined) store.galleryItems[index].image = image;
-    if (projectId !== undefined) store.galleryItems[index].projectId = projectId;
-
-    saveStoreData(store);
-    res.json({ success: true, galleryItem: store.galleryItems[index] });
+    res.json({
+      success: true,
+      galleryItem: {
+        id,
+        title,
+        category,
+        image,
+        projectId
+      }
+    });
   } catch (err: any) {
+    console.error("[Cloudinary] Gallery PUT error:", err);
     res.status(500).json({ error: err.message });
   }
-});
+};
+
+const handleDeleteGallery = async (req: express.Request, res: express.Response) => {
+  try {
+    const { id } = req.params;
+    const cloudinaryConfigured = !!(process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET);
+
+    if (cloudinaryConfigured && id && !id.startsWith("gallery-bulk") && !id.startsWith("gallery-")) {
+      console.log(`[Cloudinary] Destroying resource ${id} in Cloudinary...`);
+      await cloudinary.uploader.destroy(id);
+    }
+
+    res.json({ success: true, message: "Gallery image removed successfully." });
+  } catch (err: any) {
+    console.error("[Cloudinary] Gallery DELETE error:", err);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// Gallery REST Endpoints
+app.get("/api/gallery", handleGetGallery);
+app.post("/api/gallery", handlePostGallery);
+app.put("/api/gallery/:id", handlePutGallery);
+app.delete("/api/gallery/:id", handleDeleteGallery);
+
+// Legacy/Admin mappings
+app.get("/api/admin/gallery", handleGetGallery);
+app.post("/api/admin/gallery", handlePostGallery);
+app.put("/api/admin/gallery/:id", handlePutGallery);
+app.delete("/api/admin/gallery/:id", handleDeleteGallery);
 
 app.put("/api/admin/seo", (req, res) => {
   try {
