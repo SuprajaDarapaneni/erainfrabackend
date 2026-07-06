@@ -43,6 +43,7 @@ export interface IProject extends Document {
   amenities: string[];
   status: string;
   image: string;
+  images: string[];
   description: string;
   acres: string;
   units: string;
@@ -113,6 +114,13 @@ export interface IDownloadCount extends Document {
   count: number;
 }
 
+export interface ILocalUpload extends Document {
+  filename: string;
+  base64Data: string;
+  contentType: string;
+  uploadedAt: string;
+}
+
 // --- Schemas ---
 
 const CompanyDetailsSchema = new Schema<ICompanyDetails>({
@@ -156,6 +164,7 @@ const ProjectSchema = new Schema<IProject>({
   amenities: [String],
   status: String,
   image: String,
+  images: [String],
   description: String,
   acres: String,
   units: String,
@@ -226,6 +235,13 @@ const DownloadCountSchema = new Schema<IDownloadCount>({
   count: { type: Number, default: 42 }
 }, { timestamps: true });
 
+const LocalUploadSchema = new Schema<ILocalUpload>({
+  filename: { type: String, required: true, unique: true },
+  base64Data: { type: String, required: true },
+  contentType: { type: String, default: "image/jpeg" },
+  uploadedAt: { type: String, default: () => new Date().toISOString() }
+}, { timestamps: true });
+
 // --- Models ---
 
 export const CompanyDetails = mongoose.model<ICompanyDetails>("CompanyDetails", CompanyDetailsSchema);
@@ -237,3 +253,4 @@ export const Inquiry = mongoose.model<IInquiry>("Inquiry", InquirySchema);
 export const RecentActivity = mongoose.model<IRecentActivity>("RecentActivity", RecentActivitySchema);
 export const SeoSettings = mongoose.model<ISeoSettings>("SeoSettings", SeoSettingsSchema);
 export const DownloadCount = mongoose.model<IDownloadCount>("DownloadCount", DownloadCountSchema);
+export const LocalUpload = mongoose.model<ILocalUpload>("LocalUpload", LocalUploadSchema);
