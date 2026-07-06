@@ -15,16 +15,23 @@ import {
   Inquiry,
   RecentActivity,
   SeoSettings,
-  DownloadCount
+  DownloadCount,
+  LocalUpload
 } from "./models.js";
 
 // Load environment variables
 dotenv.config();
 
 const PORT = Number(process.env.PORT) || 3000;
-const STORE_DIR = path.join(process.cwd(), "data");
+const ROOT_DIR = process.cwd().endsWith("backend") ? path.join(process.cwd(), "..") : process.cwd();
+const BACKEND_DIR = process.cwd().endsWith("backend") ? process.cwd() : path.join(process.cwd(), "backend");
+
+const STORE_DIR = path.join(ROOT_DIR, "data");
 const STORE_FILE = path.join(STORE_DIR, "store.json");
-const UPLOADS_DIR = path.join(process.cwd(), "uploads");
+const UPLOADS_DIR = path.join(ROOT_DIR, "uploads");
+const PUBLIC_UPLOADS_DIR = path.join(ROOT_DIR, "public", "uploads");
+const BACKEND_UPLOADS_DIR = path.join(BACKEND_DIR, "uploads");
+const BACKEND_PUBLIC_UPLOADS_DIR = path.join(BACKEND_DIR, "public", "uploads");
 
 // Ensure directories exist
 if (!fs.existsSync(STORE_DIR)) {
@@ -32,6 +39,15 @@ if (!fs.existsSync(STORE_DIR)) {
 }
 if (!fs.existsSync(UPLOADS_DIR)) {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+}
+if (!fs.existsSync(PUBLIC_UPLOADS_DIR)) {
+  fs.mkdirSync(PUBLIC_UPLOADS_DIR, { recursive: true });
+}
+if (!fs.existsSync(BACKEND_UPLOADS_DIR)) {
+  fs.mkdirSync(BACKEND_UPLOADS_DIR, { recursive: true });
+}
+if (!fs.existsSync(BACKEND_PUBLIC_UPLOADS_DIR)) {
+  fs.mkdirSync(BACKEND_PUBLIC_UPLOADS_DIR, { recursive: true });
 }
 
 // Initial data schema loaded if database is empty
@@ -661,6 +677,30 @@ app.get("/uploads/:filename", async (req, res) => {
       return res.sendFile(destPath);
     }
 
+    // If it does not exist on disk, check MongoDB to restore it
+    try {
+      const fileDoc = await LocalUpload.findOne({ filename });
+      if (fileDoc && fileDoc.base64Data) {
+        const buffer = Buffer.from(fileDoc.base64Data, "base64");
+        
+        // Ensure local uploads directory exists
+        if (!fs.existsSync(UPLOADS_DIR)) {
+          fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+        }
+        
+        // Write to disk so subsequent requests serve it instantly
+        fs.writeFileSync(destPath, buffer);
+        console.log(`[MongoDB] Successfully restored file ${filename} to disk from MongoDB.`);
+        
+        if (fileDoc.contentType) {
+          res.setHeader("Content-Type", fileDoc.contentType);
+        }
+        return res.send(buffer);
+      }
+    } catch (fErr: any) {
+      console.error(`[MongoDB] Error recovering file ${filename} from database:`, fErr.message);
+    }
+
     res.status(404).send("File not found");
   } catch (err: any) {
     console.error("[Uploads] Error serving file:", err);
@@ -1012,6 +1052,56 @@ app.post("/api/admin/upload", async (req, res) => {
     }
 
     fs.writeFileSync(destPath, buffer);
+
+    // Save additional local copies to public/uploads, backend/uploads and backend/public/uploads folders to make sure the website reflects them instantly
+    try {
+      const rootPublicPath = path.join(PUBLIC_UPLOADS_DIR, safeName);
+      if (!fs.existsSync(path.dirname(rootPublicPath))) {
+        fs.mkdirSync(path.dirname(rootPublicPath), { recursive: true });
+      }
+      fs.writeFileSync(rootPublicPath, buffer);
+      console.log(`[Local Uploads] Successfully stored copy in root public/uploads: ${safeName}`);
+    } catch (err: any) {
+      console.warn(`[Local Uploads] Could not write to root public/uploads:`, err.message);
+    }
+
+    try {
+      const backendUploadsPath = path.join(BACKEND_UPLOADS_DIR, safeName);
+      if (!fs.existsSync(path.dirname(backendUploadsPath))) {
+        fs.mkdirSync(path.dirname(backendUploadsPath), { recursive: true });
+      }
+      fs.writeFileSync(backendUploadsPath, buffer);
+      console.log(`[Local Uploads] Successfully stored copy in backend/uploads: ${safeName}`);
+    } catch (err: any) {
+      console.warn(`[Local Uploads] Could not write to backend/uploads:`, err.message);
+    }
+
+    try {
+      const backendPublicPath = path.join(BACKEND_PUBLIC_UPLOADS_DIR, safeName);
+      if (!fs.existsSync(path.dirname(backendPublicPath))) {
+        fs.mkdirSync(path.dirname(backendPublicPath), { recursive: true });
+      }
+      fs.writeFileSync(backendPublicPath, buffer);
+      console.log(`[Local Uploads] Successfully stored copy in backend/public/uploads: ${safeName}`);
+    } catch (err: any) {
+      console.warn(`[Local Uploads] Could not write to backend/public/uploads:`, err.message);
+    }
+
+    // Persist the file base64 data to MongoDB for permanent preservation (up to 12MB, MongoDB document limit is 16MB)
+    if (buffer.length < 12 * 1024 * 1024) {
+      try {
+        await LocalUpload.create({
+          filename: safeName,
+          base64Data: cleanBase64,
+          contentType: contentType || "image/jpeg",
+        });
+        console.log(`[MongoDB] Successfully persisted file ${safeName} in MongoDB (${buffer.length} bytes).`);
+      } catch (fErr: any) {
+        console.error(`[MongoDB] Failed to persist file ${safeName} in MongoDB:`, fErr.message);
+      }
+    } else {
+      console.warn(`[MongoDB] File ${safeName} exceeds 12MB limit (${buffer.length} bytes). Ephemeral disk storage only.`);
+    }
     
     let fileUrl = "";
     const protocol = req.headers['x-forwarded-proto'] || 'https';
