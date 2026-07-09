@@ -1,11 +1,11 @@
 import express from "express";
 import path from "path";
 import fs from "fs";
-import crypto from "crypto";
-import { createServer as createViteServer } from "vite";
-import { v2 as cloudinary } from "cloudinary";
+import cors from "cors";
 import dotenv from "dotenv";
+import crypto from "crypto";
 import mongoose from "mongoose";
+import { v2 as cloudinary } from "cloudinary";
 import {
   CompanyDetails,
   Project,
@@ -16,52 +16,21 @@ import {
   RecentActivity,
   SeoSettings,
   DownloadCount,
-  LocalUpload,
-  ICompanyDetails,
-  IProject,
-  ILifestyleAmenity,
-  ITestimonial,
-  IGalleryItem,
-  IInquiry,
-  IRecentActivity,
-  ISeoSettings,
-  IDownloadCount,
-  ILocalUpload
-} from "./models";
+  LocalUpload
+} from "./models.js";
 
-// Load environment variables from .env
+// Load environment variables
 dotenv.config();
 
-// Parse .env.example if .env does not exist to load local user customization variables securely
-const envExamplePath = path.join(process.cwd(), ".env.example");
-if (fs.existsSync(envExamplePath)) {
-  try {
-    const envContent = fs.readFileSync(envExamplePath, "utf-8");
-    envContent.split("\n").forEach((line) => {
-      const trimmed = line.trim();
-      if (trimmed && !trimmed.startsWith("#") && trimmed.includes("=")) {
-        const equalsIdx = trimmed.indexOf("=");
-        const key = trimmed.substring(0, equalsIdx).trim();
-        let val = trimmed.substring(equalsIdx + 1).trim();
-        if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-          val = val.substring(1, val.length - 1);
-        }
-        if (key && !process.env[key]) {
-          process.env[key] = val;
-        }
-      }
-    });
-  } catch (err) {
-    console.error("Failed to parse .env.example loader", err);
-  }
-}
+const PORT = Number(process.env.PORT) || 3000;
+const ROOT_DIR = process.cwd().endsWith("backend") ? path.join(process.cwd(), "..") : process.cwd();
+const BACKEND_DIR = process.cwd().endsWith("backend") ? process.cwd() : path.join(process.cwd(), "backend");
 
-// Define the store file location
-const STORE_DIR = path.join(process.cwd(), "data");
+const STORE_DIR = path.join(ROOT_DIR, "data");
 const STORE_FILE = path.join(STORE_DIR, "store.json");
-const UPLOADS_DIR = path.join(process.cwd(), "uploads");
-const PUBLIC_UPLOADS_DIR = path.join(process.cwd(), "public", "uploads");
-const BACKEND_PUBLIC_UPLOADS_DIR = path.join(process.cwd(), "backend", "public", "uploads");
+const UPLOADS_DIR = path.join(ROOT_DIR, "uploads");
+const PUBLIC_UPLOADS_DIR = path.join(ROOT_DIR, "public", "uploads");
+const BACKEND_PUBLIC_UPLOADS_DIR = path.join(BACKEND_DIR, "public", "uploads");
 
 // Ensure directories exist
 if (!fs.existsSync(STORE_DIR)) {
@@ -77,7 +46,7 @@ if (!fs.existsSync(BACKEND_PUBLIC_UPLOADS_DIR)) {
   fs.mkdirSync(BACKEND_PUBLIC_UPLOADS_DIR, { recursive: true });
 }
 
-// Initial data schema loaded if STORE_FILE doesn't exist
+// Initial data schema loaded if database is empty
 const INITIAL_DATA = {
   companyDetails: {
     name: "ERA INFRA DEVELOPERS",
@@ -374,16 +343,16 @@ const INITIAL_DATA = {
 
 let storeInMemory: any = null;
 
-// Initialize Cloudinary if credentials exist
+// Initialize Cloudinary
 if (process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET) {
   cloudinary.config({
     cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
     api_key: process.env.CLOUDINARY_API_KEY,
     api_secret: process.env.CLOUDINARY_API_SECRET
   });
-  console.log("[Cloudinary] Credentials initialized successfully.");
+  console.log("[Cloudinary] Standalone Credentials initialized successfully.");
 } else {
-  console.warn("[Cloudinary] Credentials missing in environment variables. Uploads will fall back to local disk.");
+  console.warn("[Cloudinary] Credentials missing in environment variables. Standalone uploads will fall back to local disk.");
 }
 
 // Helpers for Cloudinary integration to fetch and manage gallery items directly in Cloudinary
@@ -472,10 +441,14 @@ if (rawMongoUri.startsWith("MONGO_URL=")) {
   rawMongoUri = rawMongoUri.substring("MONGODB_URI=".length).trim();
 }
 const mongoUri = rawMongoUri;
-console.log("[MongoDB] Connecting to database...");
+console.log("[MongoDB] Standalone server connecting to database...");
 mongoose.connect(mongoUri)
-  .then(() => console.log("[MongoDB] Connected successfully to database."))
-  .catch((err) => console.error("[MongoDB] Connection failure:", err));
+  .then(() => {
+    console.log("[MongoDB] Standalone server connected to database successfully.");
+  })
+  .catch((err) => {
+    console.error("[MongoDB] Standalone server connection error:", err);
+  });
 
 // Helper to save all keys to MongoDB in background
 async function saveToMongoAll(data: typeof INITIAL_DATA) {
@@ -490,166 +463,76 @@ async function saveToMongoAll(data: typeof INITIAL_DATA) {
     delete companyObj.__v;
     await CompanyDetails.findOneAndUpdate({}, companyObj, { upsert: true, new: true });
 
-    // 2. Projects (bulk replace with safety backup/restore)
-    const originalProjects = await Project.find().lean();
-    try {
-      await Project.deleteMany({});
-      if (data.projects && data.projects.length > 0) {
-        const cleanProjects = data.projects.map((p: any) => {
-          const cp = { ...p };
-          delete cp._id;
-          delete cp.__v;
-          return cp;
-        });
-        await Project.insertMany(cleanProjects);
-      }
-    } catch (err) {
-      console.error("[MongoDB] Project sync failed. Restoring original projects...", err);
-      try {
-        await Project.deleteMany({});
-        if (originalProjects.length > 0) {
-          const cleanOriginals = originalProjects.map(({ _id, __v, createdAt, updatedAt, ...rest }: any) => rest);
-          await Project.insertMany(cleanOriginals);
-        }
-      } catch (restoreErr) {
-        console.error("[MongoDB] Critical: Failed to restore projects:", restoreErr);
-      }
-      throw err;
+    // 2. Projects (bulk replace)
+    await Project.deleteMany({});
+    if (data.projects && data.projects.length > 0) {
+      const cleanProjects = data.projects.map((p: any) => {
+        const cp = { ...p };
+        delete cp._id;
+        delete cp.__v;
+        return cp;
+      });
+      await Project.insertMany(cleanProjects);
     }
 
-    // 3. LifestyleAmenities (bulk replace with safety backup/restore)
-    const originalAmenities = await LifestyleAmenity.find().lean();
-    try {
-      await LifestyleAmenity.deleteMany({});
-      if (data.lifestyleAmenities && data.lifestyleAmenities.length > 0) {
-        const cleanAmenities = data.lifestyleAmenities.map((a: any) => {
-          const ca = { ...a };
-          delete ca._id;
-          delete ca.__v;
-          return ca;
-        });
-        await LifestyleAmenity.insertMany(cleanAmenities);
-      }
-    } catch (err) {
-      console.error("[MongoDB] Amenities sync failed. Restoring original...", err);
-      try {
-        await LifestyleAmenity.deleteMany({});
-        if (originalAmenities.length > 0) {
-          const cleanOriginals = originalAmenities.map(({ _id, __v, createdAt, updatedAt, ...rest }: any) => rest);
-          await LifestyleAmenity.insertMany(cleanOriginals);
-        }
-      } catch (restoreErr) {
-        console.error("[MongoDB] Critical: Failed to restore amenities:", restoreErr);
-      }
-      throw err;
+    // 3. LifestyleAmenities
+    await LifestyleAmenity.deleteMany({});
+    if (data.lifestyleAmenities && data.lifestyleAmenities.length > 0) {
+      const cleanAmenities = data.lifestyleAmenities.map((a: any) => {
+        const ca = { ...a };
+        delete ca._id;
+        delete ca.__v;
+        return ca;
+      });
+      await LifestyleAmenity.insertMany(cleanAmenities);
     }
 
-    // 4. Testimonials (bulk replace with safety backup/restore)
-    const originalTestimonials = await Testimonial.find().lean();
-    try {
-      await Testimonial.deleteMany({});
-      if (data.testimonials && data.testimonials.length > 0) {
-        const cleanTestimonials = data.testimonials.map((t: any) => {
-          const ct = { ...t };
-          delete ct._id;
-          delete ct.__v;
-          return ct;
-        });
-        await Testimonial.insertMany(cleanTestimonials);
-      }
-    } catch (err) {
-      console.error("[MongoDB] Testimonials sync failed. Restoring original...", err);
-      try {
-        await Testimonial.deleteMany({});
-        if (originalTestimonials.length > 0) {
-          const cleanOriginals = originalTestimonials.map(({ _id, __v, createdAt, updatedAt, ...rest }: any) => rest);
-          await Testimonial.insertMany(cleanOriginals);
-        }
-      } catch (restoreErr) {
-        console.error("[MongoDB] Critical: Failed to restore testimonials:", restoreErr);
-      }
-      throw err;
+    // 4. Testimonials
+    await Testimonial.deleteMany({});
+    if (data.testimonials && data.testimonials.length > 0) {
+      const cleanTestimonials = data.testimonials.map((t: any) => {
+        const ct = { ...t };
+        delete ct._id;
+        delete ct.__v;
+        return ct;
+      });
+      await Testimonial.insertMany(cleanTestimonials);
     }
 
-    // 5. GalleryItems (bulk replace with safety backup/restore)
-    const originalGallery = await GalleryItem.find().lean();
-    try {
-      await GalleryItem.deleteMany({});
-      if (data.galleryItems && data.galleryItems.length > 0) {
-        const cleanGallery = data.galleryItems.map((g: any) => {
-          const cg = { ...g };
-          delete cg._id;
-          delete cg.__v;
-          return cg;
-        });
-        await GalleryItem.insertMany(cleanGallery);
-      }
-    } catch (err) {
-      console.error("[MongoDB] Gallery sync failed. Restoring original...", err);
-      try {
-        await GalleryItem.deleteMany({});
-        if (originalGallery.length > 0) {
-          const cleanOriginals = originalGallery.map(({ _id, __v, createdAt, updatedAt, ...rest }: any) => rest);
-          await GalleryItem.insertMany(cleanOriginals);
-        }
-      } catch (restoreErr) {
-        console.error("[MongoDB] Critical: Failed to restore gallery:", restoreErr);
-      }
-      throw err;
+    // 5. GalleryItems
+    await GalleryItem.deleteMany({});
+    if (data.galleryItems && data.galleryItems.length > 0) {
+      const cleanGallery = data.galleryItems.map((g: any) => {
+        const cg = { ...g };
+        delete cg._id;
+        delete cg.__v;
+        return cg;
+      });
+      await GalleryItem.insertMany(cleanGallery);
     }
 
-    // 6. Inquiries (bulk replace with safety backup/restore)
-    const originalInquiries = await Inquiry.find().lean();
-    try {
-      await Inquiry.deleteMany({});
-      if (data.inquiries && data.inquiries.length > 0) {
-        const cleanInquiries = data.inquiries.map((i: any) => {
-          const ci = { ...i };
-          delete ci._id;
-          delete ci.__v;
-          return ci;
-        });
-        await Inquiry.insertMany(cleanInquiries);
-      }
-    } catch (err) {
-      console.error("[MongoDB] Inquiries sync failed. Restoring original...", err);
-      try {
-        await Inquiry.deleteMany({});
-        if (originalInquiries.length > 0) {
-          const cleanOriginals = originalInquiries.map(({ _id, __v, createdAt, updatedAt, ...rest }: any) => rest);
-          await Inquiry.insertMany(cleanOriginals);
-        }
-      } catch (restoreErr) {
-        console.error("[MongoDB] Critical: Failed to restore inquiries:", restoreErr);
-      }
-      throw err;
+    // 6. Inquiries
+    await Inquiry.deleteMany({});
+    if (data.inquiries && data.inquiries.length > 0) {
+      const cleanInquiries = data.inquiries.map((i: any) => {
+        const ci = { ...i };
+        delete ci._id;
+        delete ci.__v;
+        return ci;
+      });
+      await Inquiry.insertMany(cleanInquiries);
     }
 
-    // 7. RecentActivities (bulk replace with safety backup/restore)
-    const originalActivities = await RecentActivity.find().lean();
-    try {
-      await RecentActivity.deleteMany({});
-      if (data.recentActivities && data.recentActivities.length > 0) {
-        const cleanActivities = data.recentActivities.map((act: any) => {
-          const cact = { ...act };
-          delete cact._id;
-          delete cact.__v;
-          return cact;
-        });
-        await RecentActivity.insertMany(cleanActivities);
-      }
-    } catch (err) {
-      console.error("[MongoDB] RecentActivities sync failed. Restoring original...", err);
-      try {
-        await RecentActivity.deleteMany({});
-        if (originalActivities.length > 0) {
-          const cleanOriginals = originalActivities.map(({ _id, __v, createdAt, updatedAt, ...rest }: any) => rest);
-          await RecentActivity.insertMany(cleanOriginals);
-        }
-      } catch (restoreErr) {
-        console.error("[MongoDB] Critical: Failed to restore recent activities:", restoreErr);
-      }
-      throw err;
+    // 7. RecentActivities
+    await RecentActivity.deleteMany({});
+    if (data.recentActivities && data.recentActivities.length > 0) {
+      const cleanActivities = data.recentActivities.map((act: any) => {
+        const cact = { ...act };
+        delete cact._id;
+        delete cact.__v;
+        return cact;
+      });
+      await RecentActivity.insertMany(cleanActivities);
     }
 
     // 8. SeoSettings
@@ -661,96 +544,52 @@ async function saveToMongoAll(data: typeof INITIAL_DATA) {
     // 9. DownloadCount
     await DownloadCount.findOneAndUpdate({}, { count: data.downloadCount !== undefined ? data.downloadCount : 42 }, { upsert: true, new: true });
 
-    console.log("[MongoDB] All collections synced successfully in MongoDB.");
+    console.log("[MongoDB] Standalone database collections synced successfully in background.");
   } catch (err) {
-    console.error("[MongoDB] Error saving to MongoDB collections:", err);
-    throw err;
+    console.error("[MongoDB] Error saving to standalone MongoDB collections:", err);
   }
 }
 
-// Helper to asynchronously refresh storeInMemory cache from MongoDB before serving or modifying
-async function refreshStoreFromMongo() {
-  if (mongoose.connection.readyState !== 1) {
-    return;
-  }
-  try {
-    const company = await CompanyDetails.findOne().lean();
-    const projects = await Project.find().lean();
-    const amenities = await LifestyleAmenity.find().lean();
-    const testimonials = await Testimonial.find().lean();
-    const gallery = await GalleryItem.find().lean();
-    const inquiries = await Inquiry.find().lean();
-    const activities = await RecentActivity.find().lean();
-    const seo = await SeoSettings.findOne().lean();
-    const downloads = await DownloadCount.findOne().lean();
-
-    const current = storeInMemory || JSON.parse(JSON.stringify(INITIAL_DATA));
-
-    if (company) {
-      const { _id, __v, createdAt, updatedAt, ...cleanCompany } = company as any;
-      current.companyDetails = cleanCompany;
-    }
-    current.projects = projects ? projects.map(({ _id, __v, createdAt, updatedAt, ...rest }: any) => rest) : [];
-    current.lifestyleAmenities = amenities ? amenities.map(({ _id, __v, createdAt, updatedAt, ...rest }: any) => rest) : [];
-    current.testimonials = testimonials ? testimonials.map(({ _id, __v, createdAt, updatedAt, ...rest }: any) => rest) : [];
-    current.galleryItems = gallery ? gallery.map(({ _id, __v, createdAt, updatedAt, ...rest }: any) => rest) : [];
-    current.inquiries = inquiries ? inquiries.map(({ _id, __v, createdAt, updatedAt, ...rest }: any) => rest) : [];
-    current.recentActivities = activities ? activities.map(({ _id, __v, createdAt, updatedAt, ...rest }: any) => rest) : [];
-    
-    if (seo) {
-      const { _id, __v, createdAt, updatedAt, ...cleanSeo } = seo as any;
-      current.seoSettings = cleanSeo;
-    }
-    if (downloads) {
-      current.downloadCount = downloads.count;
-    }
-
-    storeInMemory = current;
-    console.log("[MongoDB] Successfully refreshed storeInMemory cache with latest database state.");
-  } catch (err) {
-    console.error("[MongoDB] Error refreshing storeInMemory cache from MongoDB:", err);
-  }
-}
-
-// Loader and Saver helpers with local + MongoDB dual engine
+// Memory Cache Helpers
 function getStoreData() {
   if (storeInMemory) {
     return storeInMemory;
   }
 
-  let localData: any = null;
-  if (fs.existsSync(STORE_FILE)) {
-    try {
+  try {
+    if (fs.existsSync(STORE_FILE)) {
       const content = fs.readFileSync(STORE_FILE, "utf8");
-      localData = JSON.parse(content);
-    } catch (err) {
-      console.error("Error parsing store.json, restoring defaults", err);
+      storeInMemory = JSON.parse(content);
+      return storeInMemory;
     }
+  } catch (err) {
+    console.error("Failed to read store.json cached parameters", err);
   }
 
-  storeInMemory = localData || JSON.parse(JSON.stringify(INITIAL_DATA));
+  storeInMemory = JSON.parse(JSON.stringify(INITIAL_DATA));
+  saveStoreData(storeInMemory);
   return storeInMemory;
 }
 
-async function saveStoreData(data: typeof INITIAL_DATA) {
+function saveStoreData(data: any) {
   storeInMemory = data;
   try {
     fs.writeFileSync(STORE_FILE, JSON.stringify(data, null, 2), "utf8");
   } catch (err) {
-    console.error("Failed to write local store.json fallback:", err);
+    console.error("Failed to write offline store file data:", err);
   }
 
-  // Push to MongoDB and await completion to prevent race conditions or data drops
-  await saveToMongoAll(data);
+  if (mongoose.connection.readyState === 1) {
+    saveToMongoAll(data).catch((err) => {
+      console.error("[MongoDB] Background MongoDB sync failed:", err);
+    });
+  }
 }
 
-async function startServer() {
-  const app = express();
-  const PORT = 3000;
-
-  // Pre-load from MongoDB if connection is ready (or wait for it briefly)
+// Preload site data from MongoDB on Startup
+async function syncFromMongo() {
   try {
-    console.log("[MongoDB] Checking connection for pre-loading site data...");
+    console.log("[MongoDB] Pre-loading site data from MongoDB...");
     if (mongoose.connection.readyState !== 1) {
       await new Promise<void>((resolve) => {
         const timer = setTimeout(() => {
@@ -776,1050 +615,817 @@ async function startServer() {
       const seo = await SeoSettings.findOne().lean();
       const downloads = await DownloadCount.findOne().lean();
 
-      const current = getStoreData();
-      let modifiedAny = false;
-
-      // Determine if this is a completely fresh database
-      const isFreshDatabase = !(company || (projects && projects.length > 0) || (amenities && amenities.length > 0) || (testimonials && testimonials.length > 0) || (gallery && gallery.length > 0));
-
-      if (!isFreshDatabase) {
-        console.log("[MongoDB] Existing site data found in MongoDB. Skipping local default seeding.");
+      if (!company && projects.length === 0) {
+        console.log("[MongoDB] Database is empty. Seeding with default data...");
+        const initial = getStoreData();
+        await saveToMongoAll(initial);
+      } else {
+        const current = getStoreData();
         
         if (company) {
           const { _id, __v, createdAt, updatedAt, ...cleanCompany } = company as any;
-          if (!cleanCompany.founderImage || cleanCompany.founderImage.includes("unsplash.com") || cleanCompany.founderImage.includes("photo-")) {
-            cleanCompany.founderImage = "/uploads/founder_portrait.jpeg";
-            console.log("[MongoDB Migration] Setting founderImage to /uploads/founder_portrait.jpeg in database.");
-            await CompanyDetails.updateOne({}, { $set: { founderImage: "/uploads/founder_portrait.jpeg" } });
-          }
           current.companyDetails = cleanCompany;
-        } else {
-          current.companyDetails = JSON.parse(JSON.stringify(INITIAL_DATA.companyDetails));
         }
-
-        current.projects = projects ? projects.map(({ _id, __v, createdAt, updatedAt, ...rest }: any) => rest) : [];
-        current.lifestyleAmenities = amenities ? amenities.map(({ _id, __v, createdAt, updatedAt, ...rest }: any) => rest) : [];
-        current.testimonials = testimonials ? testimonials.map(({ _id, __v, createdAt, updatedAt, ...rest }: any) => rest) : [];
-        current.galleryItems = gallery ? gallery.map(({ _id, __v, createdAt, updatedAt, ...rest }: any) => rest) : [];
-        current.inquiries = inquiries ? inquiries.map(({ _id, __v, createdAt, updatedAt, ...rest }: any) => rest) : [];
-        current.recentActivities = activities ? activities.map(({ _id, __v, createdAt, updatedAt, ...rest }: any) => rest) : [];
-
+        if (projects && projects.length > 0) {
+          current.projects = projects.map(({ _id, __v, createdAt, updatedAt, ...rest }: any) => rest);
+        }
+        if (amenities && amenities.length > 0) {
+          current.lifestyleAmenities = amenities.map(({ _id, __v, createdAt, updatedAt, ...rest }: any) => rest);
+        }
+        if (testimonials && testimonials.length > 0) {
+          current.testimonials = testimonials.map(({ _id, __v, createdAt, updatedAt, ...rest }: any) => rest);
+        }
+        if (gallery && gallery.length > 0) {
+          current.galleryItems = gallery.map(({ _id, __v, createdAt, updatedAt, ...rest }: any) => rest);
+        }
+        if (inquiries && inquiries.length > 0) {
+          current.inquiries = inquiries.map(({ _id, __v, createdAt, updatedAt, ...rest }: any) => rest);
+        }
+        if (activities && activities.length > 0) {
+          current.recentActivities = activities.map(({ _id, __v, createdAt, updatedAt, ...rest }: any) => rest);
+        }
         if (seo) {
           const { _id, __v, createdAt, updatedAt, ...cleanSeo } = seo as any;
           current.seoSettings = cleanSeo;
-        } else {
-          current.seoSettings = JSON.parse(JSON.stringify(INITIAL_DATA.seoSettings));
         }
-
-        current.downloadCount = downloads ? downloads.count : 42;
-      } else {
-        console.log("[MongoDB] Fresh database detected. Seeding collections from local store defaults...");
-
-        // 1. Company Details
-        if (current.companyDetails) {
-          console.log("[MongoDB] Seeding CompanyDetails from local store...");
-          const companyObj = JSON.parse(JSON.stringify(current.companyDetails));
-          delete companyObj._id;
-          delete companyObj.__v;
-          await CompanyDetails.create(companyObj);
-          modifiedAny = true;
+        if (downloads) {
+          current.downloadCount = downloads.count;
         }
-
-        // 2. Projects
-        if (current.projects && current.projects.length > 0) {
-          console.log("[MongoDB] Seeding Projects from local store...");
-          const cleanProjects = current.projects.map((p: any) => {
-            const cp = { ...p };
-            delete cp._id;
-            delete cp.__v;
-            return cp;
-          });
-          await Project.insertMany(cleanProjects);
-          modifiedAny = true;
-        }
-
-        // 3. Lifestyle Amenities
-        if (current.lifestyleAmenities && current.lifestyleAmenities.length > 0) {
-          console.log("[MongoDB] Seeding LifestyleAmenities from local store...");
-          const cleanAmenities = current.lifestyleAmenities.map((a: any) => {
-            const ca = { ...a };
-            delete ca._id;
-            delete ca.__v;
-            return ca;
-          });
-          await LifestyleAmenity.insertMany(cleanAmenities);
-          modifiedAny = true;
-        }
-
-        // 4. Testimonials
-        if (current.testimonials && current.testimonials.length > 0) {
-          console.log("[MongoDB] Seeding Testimonials from local store...");
-          const cleanTestimonials = current.testimonials.map((t: any) => {
-            const ct = { ...t };
-            delete ct._id;
-            delete ct.__v;
-            return ct;
-          });
-          await Testimonial.insertMany(cleanTestimonials);
-          modifiedAny = true;
-        }
-
-        // 5. Gallery Items
-        if (current.galleryItems && current.galleryItems.length > 0) {
-          console.log("[MongoDB] Seeding GalleryItems from local store...");
-          const cleanGallery = current.galleryItems.map((g: any) => {
-            const cg = { ...g };
-            delete cg._id;
-            delete cg.__v;
-            return cg;
-          });
-          await GalleryItem.insertMany(cleanGallery);
-          modifiedAny = true;
-        }
-
-        // 6. Inquiries
-        if (current.inquiries && current.inquiries.length > 0) {
-          console.log("[MongoDB] Seeding Inquiries from local store...");
-          const cleanInquiries = current.inquiries.map((i: any) => {
-            const ci = { ...i };
-            delete ci._id;
-            delete ci.__v;
-            return ci;
-          });
-          await Inquiry.insertMany(cleanInquiries);
-          modifiedAny = true;
-        }
-
-        // 7. Recent Activities
-        if (current.recentActivities && current.recentActivities.length > 0) {
-          console.log("[MongoDB] Seeding RecentActivities from local store...");
-          const cleanActivities = current.recentActivities.map((act: any) => {
-            const cact = { ...act };
-            delete cact._id;
-            delete cact.__v;
-            return cact;
-          });
-          await RecentActivity.insertMany(cleanActivities);
-          modifiedAny = true;
-        }
-
-        // 8. SEO Settings
-        if (current.seoSettings) {
-          console.log("[MongoDB] Seeding SeoSettings from local store...");
-          const seoObj = JSON.parse(JSON.stringify(current.seoSettings));
-          delete seoObj._id;
-          delete seoObj.__v;
-          await SeoSettings.create(seoObj);
-          modifiedAny = true;
-        }
-
-        // 9. Download Count
-        console.log("[MongoDB] Seeding DownloadCount from local store...");
-        await DownloadCount.create({ count: current.downloadCount !== undefined ? current.downloadCount : 42 });
-        modifiedAny = true;
+        
+        storeInMemory = current;
+        console.log("[MongoDB] Successfully loaded site data from cloud MongoDB database.");
       }
-
-      if (modifiedAny) {
-        try {
-          fs.writeFileSync(STORE_FILE, JSON.stringify(current, null, 2), "utf8");
-          console.log("[MongoDB Seeding] Synchronized local store.json file with new MongoDB seeds.");
-        } catch (fErr: any) {
-          console.warn("[MongoDB Seeding] Could not sync local file:", fErr.message);
-        }
-      }
-
-      storeInMemory = current;
-      console.log("[MongoDB] Granular site data synchronization complete.");
     }
   } catch (err) {
     console.error("[MongoDB] Error during pre-loading from MongoDB:", err);
-    console.warn("[MongoDB] Falling back to local store file.");
+  }
+}
+
+syncFromMongo();
+
+// Express App Configuration
+const app = express();
+
+app.use(cors());
+app.use(express.json({ limit: "15mb" }));
+app.use(express.urlencoded({ extended: true, limit: "15mb" }));
+
+// Route to serve uploads
+app.get("/uploads/:filename", async (req, res) => {
+  try {
+    const { filename } = req.params;
+    const destPath = path.join(UPLOADS_DIR, filename);
+
+    if (fs.existsSync(destPath)) {
+      return res.sendFile(destPath);
+    }
+
+    // If it does not exist on disk, check MongoDB to restore it
+    try {
+      const fileDoc = await LocalUpload.findOne({ filename });
+      if (fileDoc && fileDoc.base64Data) {
+        const buffer = Buffer.from(fileDoc.base64Data, "base64");
+        
+        // Ensure local uploads directory exists
+        if (!fs.existsSync(UPLOADS_DIR)) {
+          fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+        }
+        
+        // Write to disk so subsequent requests serve it instantly
+        fs.writeFileSync(destPath, buffer);
+        console.log(`[MongoDB] Successfully restored file ${filename} to disk from MongoDB.`);
+        
+        if (fileDoc.contentType) {
+          res.setHeader("Content-Type", fileDoc.contentType);
+        }
+        return res.send(buffer);
+      }
+    } catch (fErr: any) {
+      console.error(`[MongoDB] Error recovering file ${filename} from database:`, fErr.message);
+    }
+
+    res.status(404).send("File not found");
+  } catch (err: any) {
+    console.error("[Uploads] Error serving file:", err);
+    res.status(500).send("Internal Server Error");
+  }
+});
+
+// Root Route for Standalone Deployment Checks
+app.get("/", (req, res) => {
+  res.json({
+    status: "online",
+    message: "Era Infra Standalone API Backend with MongoDB & Cloudinary is running perfectly.",
+    timestamp: new Date().toISOString(),
+    endpoints: {
+      health: "/api/health",
+      siteData: "/api/site-data"
+    }
+  });
+});
+
+// API Routes
+app.get("/api/health", (req, res) => {
+  res.json({ status: "ok", time: new Date().toISOString() });
+});
+
+app.get("/api/site-data", async (req, res) => {
+  try {
+    const data = getStoreData();
+    const liveGallery = await fetchGalleryFromCloudinary();
+    if (liveGallery && liveGallery.length > 0) {
+      data.galleryItems = liveGallery;
+    }
+    res.json(data);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/inquiries", (req, res) => {
+  try {
+    const { name, phone, email, projectSelected, propertyType, budget, message, visitDate } = req.body;
+    
+    if (!name || !phone) {
+      return res.status(400).json({ error: "Name and phone fields are mandatory." });
+    }
+
+    const store = getStoreData();
+    const newInq = {
+      id: "inq-" + Date.now(),
+      name,
+      phone,
+      email: email || "N/A",
+      projectSelected: projectSelected || "General Custom Inquiry",
+      propertyType: propertyType || "Plots",
+      budget: budget || "Under ₹50 Lakhs",
+      message: message || "Interested, request urgent call-back.",
+      visitDate: visitDate || "",
+      timestamp: new Date().toISOString(),
+      status: "Pending",
+      contacted: false
+    };
+
+    store.inquiries.unshift(newInq);
+
+    const activityText = visitDate 
+      ? `Site visit booked by ${name} for "${newInq.projectSelected}" on ${visitDate}`
+      : `New callback request submitted by ${name} for "${newInq.projectSelected}"`;
+
+    store.recentActivities.unshift({
+      id: "act-" + Date.now(),
+      text: activityText,
+      type: visitDate ? "booking" : "contact",
+      timestamp: new Date().toISOString()
+    });
+
+    if (store.recentActivities.length > 50) {
+      store.recentActivities.pop();
+    }
+
+    saveStoreData(store);
+    res.status(201).json({ success: true, inquiry: newInq });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/track-brochure-download", (req, res) => {
+  try {
+    const { projectName } = req.body;
+    const store = getStoreData();
+    store.downloadCount = (store.downloadCount || 0) + 1;
+    
+    store.recentActivities.unshift({
+      id: "act-" + Date.now(),
+      text: `Brochure pdf downloaded for project "${projectName || "General Portfolio"}"`,
+      type: "system",
+      timestamp: new Date().toISOString()
+    });
+    
+    saveStoreData(store);
+    res.json({ success: true, currentCount: store.downloadCount });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/admin/login", (req, res) => {
+  const { email, password } = req.body;
+  const secureAdminEmail = process.env.ADMIN_EMAIL || "admin@erainfra.com";
+  const secureAdminPassword = process.env.ADMIN_PASSWORD || "admin123";
+
+  if (
+    (email === secureAdminEmail && password === secureAdminPassword) ||
+    (email === "admin@erainfra.com" && password === "admin123") ||
+    (email === "admin@erainfra.com" && password === "admin")
+  ) {
+    return res.json({
+      success: true,
+      user: { email: email === "admin@erainfra.com" ? email : secureAdminEmail, role: "Super Admin", name: "Ravi Kiran (MD)" },
+      token: "session-super-admin-web-token-10774"
+    });
+  }
+  
+  if (email === "manager@erainfra.com" && password === "manager123") {
+    return res.json({
+      success: true,
+      user: { email, role: "Content Manager", name: "Desk Coordinator" },
+      token: "session-content-manager-web-token-5511"
+    });
   }
 
-  // Configure maximum body size for raw base64 image streams
-  app.use(express.json({ limit: "15mb" }));
-  app.use(express.urlencoded({ extended: true, limit: "15mb" }));
+  return res.status(401).json({ error: "Invalid login email or password." });
+});
 
-  // Enable CORS middleware so Vercel client can query Render server seamlessly
-  app.use((req, res, next) => {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-    if (req.method === "OPTIONS") {
-      return res.sendStatus(204);
+// Database and storage connectivity diagnostic check API
+app.get("/api/admin/db-status", async (req, res) => {
+  try {
+    const mongoState = mongoose.connection.readyState;
+    let mongoStatus = "Disconnected";
+    if (mongoState === 1) mongoStatus = "Connected (Read/Write OK)";
+    else if (mongoState === 2) mongoStatus = "Connecting...";
+    else if (mongoState === 3) mongoStatus = "Disconnecting...";
+    
+    const cloudinaryConfigured = !!(process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET);
+    
+    let cloudinaryStatus = "Not Configured";
+    if (cloudinaryConfigured) {
+      cloudinaryStatus = `Configured (Cloud Name: ${process.env.CLOUDINARY_CLOUD_NAME})`;
     }
-    next();
-  });
 
-  // Static uploads directory serving link
-  app.get("/uploads/:filename", async (req, res) => {
-    try {
-      const { filename } = req.params;
-      const destPath = path.join(UPLOADS_DIR, filename);
-
-      // 1. If it exists on disk, serve it immediately
-      if (fs.existsSync(destPath)) {
-        return res.sendFile(destPath);
+    res.json({
+      success: true,
+      mongodb: {
+        status: mongoStatus,
+        readyState: mongoState,
+        uri: process.env.MONGODB_URI ? "Configured" : "Not Configured"
+      },
+      cloudinary: {
+        status: cloudinaryStatus,
+        configured: cloudinaryConfigured
+      },
+      localUploads: {
+        path: UPLOADS_DIR,
+        exists: fs.existsSync(UPLOADS_DIR),
+        files: fs.existsSync(UPLOADS_DIR) ? fs.readdirSync(UPLOADS_DIR).length : 0
       }
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 
-      // 2. If it does not exist on disk, check MongoDB to restore it
+app.put("/api/admin/company", (req, res) => {
+  try {
+    const { name, alias, slogan, subtitle, mdName, mdRole, phone1, phone2, email, address, aboutStory, vision, mission, stats, slides } = req.body;
+    const store = getStoreData();
+    
+    store.companyDetails = {
+      ...store.companyDetails,
+      name: name || store.companyDetails.name,
+      alias: alias || store.companyDetails.alias,
+      slogan: slogan || store.companyDetails.slogan,
+      subtitle: subtitle || store.companyDetails.subtitle,
+      mdName: mdName || store.companyDetails.mdName,
+      mdRole: mdRole || store.companyDetails.mdRole,
+      phone1: phone1 || store.companyDetails.phone1,
+      phone2: phone2 || store.companyDetails.phone2,
+      email: email || store.companyDetails.email,
+      address: address || store.companyDetails.address,
+      aboutStory: aboutStory || store.companyDetails.aboutStory,
+      vision: vision || store.companyDetails.vision,
+      mission: mission || store.companyDetails.mission,
+      stats: stats || store.companyDetails.stats,
+      headerVideo: req.body.headerVideo || store.companyDetails.headerVideo,
+      founderName: req.body.founderName || store.companyDetails.founderName,
+      founderImage: req.body.founderImage || store.companyDetails.founderImage,
+      founderBio: req.body.founderBio || store.companyDetails.founderBio,
+      founderQuote: req.body.founderQuote || store.companyDetails.founderQuote,
+      slides: slides !== undefined ? slides : store.companyDetails.slides
+    };
+
+    store.recentActivities.unshift({
+      id: "act-" + Date.now(),
+      text: "Company profile details & CMS static blocks saved",
+      type: "system",
+      timestamp: new Date().toISOString()
+    });
+
+    saveStoreData(store);
+    res.json({ success: true, companyDetails: store.companyDetails });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/admin/projects", (req, res) => {
+  try {
+    const project = req.body;
+    if (!project.name) {
+      return res.status(400).json({ error: "Project name is mandatory." });
+    }
+
+    const store = getStoreData();
+    const slug = (project.name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    
+    const newProj = {
+      id: "era-" + (project.id || slug || Date.now().toString()),
+      name: project.name,
+      location: project.location || "Vijayawada",
+      type: project.type || "Plots",
+      priceRange: project.priceRange || "₹30 Lakhs - ₹60 Lakhs",
+      priceMin: Number(project.priceMin) || 30,
+      amenities: Array.isArray(project.amenities) ? project.amenities : [],
+      status: project.status || "Pre-Launch",
+      image: project.image || "https://images.unsplash.com/photo-1513694203232-719a280e022f?auto=format&fit=crop&w=1200&q=80",
+      images: Array.isArray(project.images) ? project.images : [],
+      description: project.description || "Premium property layout designed by Era Infra Developers",
+      acres: project.acres || "15 Acres",
+      units: project.units || "100 Units",
+      sizeRange: project.sizeRange || "150 - 300 Sq.Yards",
+      reraNo: project.reraNo || "",
+      mapLink: project.mapLink || "",
+      originalFeatured: !!project.originalFeatured,
+      brochureUrl: project.brochureUrl || ""
+    };
+
+    store.projects.push(newProj);
+    store.recentActivities.unshift({
+      id: "act-" + Date.now(),
+      text: `New project "${newProj.name}" added to signature collection`,
+      type: "system",
+      timestamp: new Date().toISOString()
+    });
+
+    saveStoreData(store);
+    res.status(201).json({ success: true, project: newProj });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put("/api/admin/projects/:id", (req, res) => {
+  try {
+    const { id } = req.params;
+    const projectData = req.body;
+    const store = getStoreData();
+    
+    const index = store.projects.findIndex((p: any) => p.id === id);
+    if (index === -1) {
+      return res.status(404).json({ error: "Project layout parameters not found." });
+    }
+
+    store.projects[index] = {
+      ...store.projects[index],
+      name: projectData.name || store.projects[index].name,
+      location: projectData.location || store.projects[index].location,
+      type: projectData.type || store.projects[index].type,
+      priceRange: projectData.priceRange || store.projects[index].priceRange,
+      priceMin: projectData.priceMin !== undefined ? Number(projectData.priceMin) : store.projects[index].priceMin,
+      amenities: Array.isArray(projectData.amenities) ? projectData.amenities : store.projects[index].amenities,
+      status: projectData.status || store.projects[index].status,
+      image: projectData.image || store.projects[index].image,
+      images: Array.isArray(projectData.images) ? projectData.images : store.projects[index].images,
+      description: projectData.description || store.projects[index].description,
+      acres: projectData.acres || store.projects[index].acres,
+      units: projectData.units || store.projects[index].units,
+      sizeRange: projectData.sizeRange || store.projects[index].sizeRange,
+      reraNo: projectData.reraNo !== undefined ? projectData.reraNo : store.projects[index].reraNo,
+      mapLink: projectData.mapLink !== undefined ? projectData.mapLink : store.projects[index].mapLink,
+      originalFeatured: projectData.originalFeatured !== undefined ? !!projectData.originalFeatured : store.projects[index].originalFeatured,
+      brochureUrl: projectData.brochureUrl !== undefined ? projectData.brochureUrl : store.projects[index].brochureUrl
+    };
+
+    store.recentActivities.unshift({
+      id: "act-" + Date.now(),
+      text: `Project layout "${store.projects[index].name}" updated successfully`,
+      type: "system",
+      timestamp: new Date().toISOString()
+    });
+
+    saveStoreData(store);
+    res.json({ success: true, project: store.projects[index] });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete("/api/admin/projects/:id", (req, res) => {
+  try {
+    const { id } = req.params;
+    const store = getStoreData();
+    
+    const project = store.projects.find((p: any) => p.id === id);
+    if (!project) {
+      return res.status(404).json({ error: "Project not found or already deleted." });
+    }
+
+    store.projects = store.projects.filter((p: any) => p.id !== id);
+    
+    store.recentActivities.unshift({
+      id: "act-" + Date.now(),
+      text: `Removed project layout "${project.name}" from dynamic portfolio listings`,
+      type: "system",
+      timestamp: new Date().toISOString()
+    });
+
+    saveStoreData(store);
+    res.json({ success: true, message: `Project ${id} removed.` });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/admin/upload", async (req, res) => {
+  try {
+    const { filename, base64Data, contentType } = req.body;
+    if (!filename || !base64Data) {
+      return res.status(400).json({ error: "Filename and base64Data fields are required." });
+    }
+
+    const cleanBase64 = base64Data.replace(/^data:.+;base64,/, "");
+    const buffer = Buffer.from(cleanBase64, "base64");
+    
+    const safeName = Date.now() + "_" + filename.replace(/[^a-zA-Z0-9.\-_]/g, "");
+    const destPath = path.join(UPLOADS_DIR, safeName);
+    
+    if (!fs.existsSync(UPLOADS_DIR)) {
+      fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+    }
+
+    fs.writeFileSync(destPath, buffer);
+
+    // Save additional local copies to public/uploads and backend/public/uploads folders to make sure the website reflects them instantly
+    try {
+      const rootPublicPath = path.join(PUBLIC_UPLOADS_DIR, safeName);
+      if (!fs.existsSync(path.dirname(rootPublicPath))) {
+        fs.mkdirSync(path.dirname(rootPublicPath), { recursive: true });
+      }
+      fs.writeFileSync(rootPublicPath, buffer);
+      console.log(`[Local Uploads] Successfully stored copy in root public/uploads: ${safeName}`);
+    } catch (err: any) {
+      console.warn(`[Local Uploads] Could not write to root public/uploads:`, err.message);
+    }
+
+    try {
+      const backendPublicPath = path.join(BACKEND_PUBLIC_UPLOADS_DIR, safeName);
+      if (!fs.existsSync(path.dirname(backendPublicPath))) {
+        fs.mkdirSync(path.dirname(backendPublicPath), { recursive: true });
+      }
+      fs.writeFileSync(backendPublicPath, buffer);
+      console.log(`[Local Uploads] Successfully stored copy in backend/public/uploads: ${safeName}`);
+    } catch (err: any) {
+      console.warn(`[Local Uploads] Could not write to backend/public/uploads:`, err.message);
+    }
+
+    // Persist the file base64 data to MongoDB for permanent preservation (up to 12MB, MongoDB document limit is 16MB)
+    if (buffer.length < 12 * 1024 * 1024) {
       try {
-        const fileDoc = await LocalUpload.findOne({ filename });
-        if (fileDoc && fileDoc.base64Data) {
-          const buffer = Buffer.from(fileDoc.base64Data, "base64");
-          
-          // Ensure local uploads directory exists
-          if (!fs.existsSync(UPLOADS_DIR)) {
-            fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-          }
-          
-          // Write to disk so subsequent requests serve it instantly
-          fs.writeFileSync(destPath, buffer);
-          console.log(`[MongoDB] Successfully restored file ${filename} to disk from MongoDB.`);
-          
-          if (fileDoc.contentType) {
-            res.setHeader("Content-Type", fileDoc.contentType);
-          }
-          return res.send(buffer);
-        }
+        await LocalUpload.create({
+          filename: safeName,
+          base64Data: cleanBase64,
+          contentType: contentType || "image/jpeg",
+        });
+        console.log(`[MongoDB] Successfully persisted file ${safeName} in MongoDB (${buffer.length} bytes).`);
       } catch (fErr: any) {
-        console.error(`[MongoDB] Error recovering file ${filename} from database:`, fErr.message);
+        console.error(`[MongoDB] Failed to persist file ${safeName} in MongoDB:`, fErr.message);
       }
-
-      // 3. Fallback to 404
-      res.status(404).send("File not found");
-    } catch (err: any) {
-      console.error("[Uploads Serving] Error serving file:", err);
-      res.status(500).send("Internal Server Error");
-    }
-  });
-
-  // --- API ROUTING SECTION ---
-
-  // Standard health check
-  app.get("/api/health", (req, res) => {
-    res.json({ status: "ok", time: new Date().toISOString() });
-  });
-
-  // Fetch all site configuration structures
-  app.get("/api/site-data", async (req, res) => {
-    try {
-      await refreshStoreFromMongo();
-      const data = getStoreData();
-      const liveGallery = await fetchGalleryFromCloudinary();
-      const mergedMap = new Map();
-      for (const item of (data.galleryItems || [])) {
-        mergedMap.set(item.id, item);
-      }
-      for (const item of liveGallery) {
-        mergedMap.set(item.id, item);
-      }
-      data.galleryItems = Array.from(mergedMap.values());
-      res.json(data);
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // General public inquiry posting
-  app.post("/api/inquiries", async (req, res) => {
-    try {
-      await refreshStoreFromMongo();
-      const { name, phone, email, projectSelected, propertyType, budget, message, visitDate } = req.body;
-      
-      if (!name || !phone) {
-        return res.status(400).json({ error: "Name and phone number fields are mandatory." });
-      }
-
-      const store = getStoreData();
-      const newInq = {
-        id: "inq-" + Date.now(),
-        name,
-        phone,
-        email: email || "N/A",
-        projectSelected: projectSelected || "General Custom Inquiry",
-        propertyType: propertyType || "Plots",
-        budget: budget || "Under ₹50 Lakhs",
-        message: message || "Interested, request urgent call-back.",
-        visitDate: visitDate || "",
-        timestamp: new Date().toISOString(),
-        status: "Pending",
-        contacted: false
-      };
-
-      store.inquiries.unshift(newInq);
-
-      // Create a recent activity logger line
-      const activityText = visitDate 
-        ? `Site visit booked by ${name} for "${newInq.projectSelected}" on ${visitDate}`
-        : `New callback request submitted by ${name} for "${newInq.projectSelected}"`;
-
-      store.recentActivities.unshift({
-        id: "act-" + Date.now(),
-        text: activityText,
-        type: visitDate ? "booking" : "contact",
-        timestamp: new Date().toISOString()
-      });
-
-      // Keep recent activities capped to 50
-      if (store.recentActivities.length > 50) {
-        store.recentActivities.pop();
-      }
-
-      await saveStoreData(store);
-      res.status(201).json({ success: true, inquiry: newInq });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // Track the brochure download counter
-  app.post("/api/track-brochure-download", async (req, res) => {
-    try {
-      await refreshStoreFromMongo();
-      const { projectName } = req.body;
-      const store = getStoreData();
-      store.downloadCount = (store.downloadCount || 0) + 1;
-      
-      store.recentActivities.unshift({
-        id: "act-" + Date.now(),
-        text: `Brochure pdf downloaded for project "${projectName || "General Portfolio"}"`,
-        type: "system",
-        timestamp: new Date().toISOString()
-      });
-      
-      await saveStoreData(store);
-      res.json({ success: true, currentCount: store.downloadCount });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // Auth credentials verification
-  app.post("/api/admin/login", (req, res) => {
-    const { email, password } = req.body;
-    
-    // Support customized credentials defined in your private AI Studio Settings Secrets or .env.example
-    const secureAdminEmail = process.env.ADMIN_EMAIL || "admin@erainfra.com";
-    const secureAdminPassword = process.env.ADMIN_PASSWORD || "admin123";
-
-    // Super Admin Credentials (checks customized secure values or classic system defaults)
-    if (
-      (email === secureAdminEmail && password === secureAdminPassword) ||
-      (email === "admin@erainfra.com" && password === "admin123") ||
-      (email === "admin@erainfra.com" && password === "admin")
-    ) {
-      return res.json({
-        success: true,
-        user: { email: email === "admin@erainfra.com" ? email : secureAdminEmail, role: "Super Admin", name: "Ravi Kiran (MD)" },
-        token: "session-super-admin-web-token-10774"
-      });
+    } else {
+      console.warn(`[MongoDB] File ${safeName} exceeds 12MB limit (${buffer.length} bytes). Ephemeral disk storage only.`);
     }
     
-    // Content Manager Credentials (only allow managers if custom admin email is not set or if specified explicitly)
-    if (email === "manager@erainfra.com" && password === "manager123") {
-      return res.json({
-        success: true,
-        user: { email, role: "Content Manager", name: "Desk Coordinator" },
-        token: "session-content-manager-web-token-5511"
-      });
-    }
+    let fileUrl = "";
+    const protocol = req.headers['x-forwarded-proto'] || 'https';
+    const fallbackUrl = `${protocol}://${req.headers.host}/uploads/${safeName}`;
+    fileUrl = fallbackUrl;
 
-    return res.status(401).json({ error: "Invalid login email or password." });
-  });
-
-  // Database and storage connectivity diagnostic check API
-  app.get("/api/admin/db-status", async (req, res) => {
-    try {
-      const storePath = STORE_FILE;
-      const storeSize = fs.existsSync(storePath) ? fs.statSync(storePath).size : 0;
-      const cloudinaryConfigured = !!(process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET);
-      
-      let mongoStatus = "Disconnected";
-      let mongoConnected = false;
-      if (mongoose.connection.readyState === 1) {
-        mongoStatus = "Connected (Read/Write OK)";
-        mongoConnected = true;
-      } else if (mongoose.connection.readyState === 2) {
-        mongoStatus = "Connecting";
-      }
-
-      let cloudinaryStatus = "Not Configured";
-      if (cloudinaryConfigured) {
-        cloudinaryStatus = `Configured (Cloud Name: ${process.env.CLOUDINARY_CLOUD_NAME})`;
-      }
-
-      res.json({
-        success: true,
-        mongoStatus: mongoStatus,
-        mongoUri: mongoUri ? mongoUri.replace(/:([^:@]+)@/, ":****@") : "Not Configured",
-        isFallback: !mongoConnected,
-        storeSize: storeSize,
-        environmentCheck: {
-          mongodb: mongoConnected,
-          cloudinary: cloudinaryConfigured,
-          localUploads: fs.existsSync(UPLOADS_DIR),
-          port: PORT,
-          nodeEnv: process.env.NODE_ENV || "development"
-        }
-      });
-    } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message });
-    }
-  });
-
-  // Update complete company profile (CMS)
-  app.put("/api/admin/company", async (req, res) => {
-    try {
-      await refreshStoreFromMongo();
-      const { name, alias, slogan, subtitle, mdName, mdRole, phone1, phone2, email, address, aboutStory, vision, mission, stats, slides } = req.body;
-      const store = getStoreData();
-      
-      store.companyDetails = {
-        ...store.companyDetails,
-        name: name || store.companyDetails.name,
-        alias: alias || store.companyDetails.alias,
-        slogan: slogan || store.companyDetails.slogan,
-        subtitle: subtitle || store.companyDetails.subtitle,
-        mdName: mdName || store.companyDetails.mdName,
-        mdRole: mdRole || store.companyDetails.mdRole,
-        phone1: phone1 || store.companyDetails.phone1,
-        phone2: phone2 || store.companyDetails.phone2,
-        email: email || store.companyDetails.email,
-        address: address || store.companyDetails.address,
-        aboutStory: aboutStory || store.companyDetails.aboutStory,
-        vision: vision || store.companyDetails.vision,
-        mission: mission || store.companyDetails.mission,
-        stats: stats || store.companyDetails.stats,
-        headerVideo: req.body.headerVideo || store.companyDetails.headerVideo,
-        founderName: req.body.founderName || store.companyDetails.founderName,
-        founderImage: req.body.founderImage || store.companyDetails.founderImage,
-        founderBio: req.body.founderBio || store.companyDetails.founderBio,
-        founderQuote: req.body.founderQuote || store.companyDetails.founderQuote,
-        slides: slides !== undefined ? slides : store.companyDetails.slides
-      };
-
-      store.recentActivities.unshift({
-        id: "act-" + Date.now(),
-        text: "Company profile details & CMS static blocks saved",
-        type: "system",
-        timestamp: new Date().toISOString()
-      });
-
-      await saveStoreData(store);
-      res.json({ success: true, companyDetails: store.companyDetails });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // Projects - Create new project
-  app.post("/api/admin/projects", async (req, res) => {
-    try {
-      await refreshStoreFromMongo();
-      const project = req.body;
-      if (!project.name) {
-        return res.status(400).json({ error: "Project name is mandatory." });
-      }
-
-      const store = getStoreData();
-      const slug = (project.name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-");
-      
-      const newProj = {
-        id: "era-" + (project.id || slug || Date.now().toString()),
-        name: project.name,
-        location: project.location || "Vijayawada",
-        type: project.type || "Plots",
-        priceRange: project.priceRange || "₹30 Lakhs - ₹60 Lakhs",
-        priceMin: Number(project.priceMin) || 30,
-        amenities: Array.isArray(project.amenities) ? project.amenities : [],
-        status: project.status || "Pre-Launch",
-        image: project.image || "https://images.unsplash.com/photo-1513694203232-719a280e022f?auto=format&fit=crop&w=1200&q=80",
-        images: Array.isArray(project.images) ? project.images : [],
-        description: project.description || "Premium property layout designed by Era Infra Developers",
-        acres: project.acres || "15 Acres",
-        units: project.units || "100 Units",
-        sizeRange: project.sizeRange || "150 - 300 Sq.Yards",
-        reraNo: project.reraNo || "",
-        mapLink: project.mapLink || "",
-        originalFeatured: !!project.originalFeatured,
-        brochureUrl: project.brochureUrl || ""
-      };
-
-      store.projects.push(newProj);
-      store.recentActivities.unshift({
-        id: "act-" + Date.now(),
-        text: `New project "${newProj.name}" added to signature collection`,
-        type: "system",
-        timestamp: new Date().toISOString()
-      });
-
-      await saveStoreData(store);
-      res.status(201).json({ success: true, project: newProj });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // Projects - Edit project
-  app.put("/api/admin/projects/:id", async (req, res) => {
-    try {
-      await refreshStoreFromMongo();
-      const { id } = req.params;
-      const projectData = req.body;
-      const store = getStoreData();
-      
-      const index = store.projects.findIndex(p => p.id === id);
-      if (index === -1) {
-        return res.status(404).json({ error: "Project layout parameters not found." });
-      }
-
-      store.projects[index] = {
-        ...store.projects[index],
-        name: projectData.name || store.projects[index].name,
-        location: projectData.location || store.projects[index].location,
-        type: projectData.type || store.projects[index].type,
-        priceRange: projectData.priceRange || store.projects[index].priceRange,
-        priceMin: projectData.priceMin !== undefined ? Number(projectData.priceMin) : store.projects[index].priceMin,
-        amenities: Array.isArray(projectData.amenities) ? projectData.amenities : store.projects[index].amenities,
-        status: projectData.status || store.projects[index].status,
-        image: projectData.image || store.projects[index].image,
-        images: Array.isArray(projectData.images) ? projectData.images : store.projects[index].images,
-        description: projectData.description || store.projects[index].description,
-        acres: projectData.acres || store.projects[index].acres,
-        units: projectData.units || store.projects[index].units,
-        sizeRange: projectData.sizeRange || store.projects[index].sizeRange,
-        reraNo: projectData.reraNo !== undefined ? projectData.reraNo : store.projects[index].reraNo,
-        mapLink: projectData.mapLink !== undefined ? projectData.mapLink : store.projects[index].mapLink,
-        originalFeatured: projectData.originalFeatured !== undefined ? !!projectData.originalFeatured : store.projects[index].originalFeatured,
-        brochureUrl: projectData.brochureUrl !== undefined ? projectData.brochureUrl : store.projects[index].brochureUrl
-      };
-
-      store.recentActivities.unshift({
-        id: "act-" + Date.now(),
-        text: `Project layout "${store.projects[index].name}" updated successfully`,
-        type: "system",
-        timestamp: new Date().toISOString()
-      });
-
-      await saveStoreData(store);
-      res.json({ success: true, project: store.projects[index] });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // Projects - Delete project
-  app.delete("/api/admin/projects/:id", async (req, res) => {
-    try {
-      await refreshStoreFromMongo();
-      const { id } = req.params;
-      const store = getStoreData();
-      
-      const project = store.projects.find(p => p.id === id);
-      if (!project) {
-        return res.status(404).json({ error: "Project not found or already deleted." });
-      }
-
-      store.projects = store.projects.filter(p => p.id !== id);
-      
-      store.recentActivities.unshift({
-        id: "act-" + Date.now(),
-        text: `Removed project layout "${project.name}" from dynamic portfolio listings`,
-        type: "system",
-        timestamp: new Date().toISOString()
-      });
-
-      await saveStoreData(store);
-      res.json({ success: true, message: `Project ${id} removed.` });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // Base64 file uploader handler with persistent Cloudinary storage and local disk fallback
-  app.post("/api/admin/upload", async (req, res) => {
-    try {
-      const { filename, base64Data, contentType } = req.body;
-      if (!filename || !base64Data) {
-        return res.status(400).json({ error: "Filename and base64Data fields are required." });
-      }
-
-      // Strip metadata prefixes if present (handles any file type MIME formatting)
-      const cleanBase64 = base64Data.replace(/^data:.+;base64,/, "");
-      const buffer = Buffer.from(cleanBase64, "base64");
-      
-      // Sanitise filename to fit clean paths
-      const safeName = Date.now() + "_" + filename.replace(/[^a-zA-Z0-9.\-_]/g, "");
-      const destPath = path.join(UPLOADS_DIR, safeName);
-      
-      // Ensure local uploads directory exists
-      if (!fs.existsSync(UPLOADS_DIR)) {
-        fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-      }
-
-      // Always save a local copy to ensure server-side fallback serving is guaranteed
-      fs.writeFileSync(destPath, buffer);
-
-      // Save additional local copies to public/uploads and backend/public/uploads folders to make sure the website reflects them instantly
+    const cloudinaryConfigured = !!(process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET);
+    if (cloudinaryConfigured) {
       try {
-        const rootPublicPath = path.join(PUBLIC_UPLOADS_DIR, safeName);
-        fs.writeFileSync(rootPublicPath, buffer);
-        console.log(`[Local Uploads] Successfully stored copy in root public/uploads: ${safeName}`);
-      } catch (err: any) {
-        console.warn(`[Local Uploads] Could not write to root public/uploads:`, err.message);
-      }
-
-      try {
-        const backendPublicPath = path.join(BACKEND_PUBLIC_UPLOADS_DIR, safeName);
-        fs.writeFileSync(backendPublicPath, buffer);
-        console.log(`[Local Uploads] Successfully stored copy in backend/public/uploads: ${safeName}`);
-      } catch (err: any) {
-        console.warn(`[Local Uploads] Could not write to backend/public/uploads:`, err.message);
-      }
-
-      // Persist the file base64 data to MongoDB for permanent preservation (up to 12MB, MongoDB document limit is 16MB)
-      if (buffer.length < 12 * 1024 * 1024) {
-        try {
-          await LocalUpload.create({
-            filename: safeName,
-            base64Data: cleanBase64,
-            contentType: contentType || "image/jpeg",
-            uploadedAt: new Date().toISOString()
-          });
-          console.log(`[MongoDB] Successfully persisted file ${safeName} in MongoDB (${buffer.length} bytes).`);
-        } catch (fErr: any) {
-          console.error(`[MongoDB] Failed to persist file ${safeName} in MongoDB:`, fErr.message);
+        let uploadInput = base64Data;
+        if (!uploadInput.startsWith("data:")) {
+          const mime = contentType || "image/jpeg";
+          uploadInput = `data:${mime};base64,${base64Data}`;
         }
-      } else {
-        console.warn(`[MongoDB] File ${safeName} exceeds 12MB limit (${buffer.length} bytes). Ephemeral disk storage only.`);
-      }
-      
-      let fileUrl = "";
-      let uploadedToStorage = false;
 
-      // Determine absolute fallback URL in case Cloudinary is not configured or fails
-      const protocol = req.headers['x-forwarded-proto'] || 'https';
-      const fallbackUrl = `${protocol}://${req.headers.host}/uploads/${safeName}`;
-      fileUrl = fallbackUrl;
+        console.log(`[Cloudinary] Standalone uploading ${safeName} to Cloudinary...`);
+        const result = await cloudinary.uploader.upload(uploadInput, {
+          folder: "era_infra",
+          public_id: path.parse(safeName).name,
+          resource_type: "auto"
+        });
 
-      // Prioritize Cloudinary upload
-      const cloudinaryConfigured = !!(process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET);
-      if (cloudinaryConfigured) {
-        try {
-          let uploadInput = base64Data;
-          if (!uploadInput.startsWith("data:")) {
-            const mime = contentType || "image/jpeg";
-            uploadInput = `data:${mime};base64,${base64Data}`;
-          }
-
-          console.log(`[Cloudinary] Uploading ${safeName} to Cloudinary...`);
-          const result = await cloudinary.uploader.upload(uploadInput, {
-            folder: "era_infra",
-            public_id: path.parse(safeName).name,
-            resource_type: "auto"
-          });
-
-          if (result && result.secure_url) {
-            fileUrl = result.secure_url;
-            uploadedToStorage = true;
-            console.log(`[Cloudinary] Upload successful! URL: ${fileUrl}`);
-          }
-        } catch (cloudinaryErr: any) {
-          console.warn("[Cloudinary] Could not upload to Cloudinary, falling back to local files:", cloudinaryErr?.message || cloudinaryErr);
+        if (result && result.secure_url) {
+          fileUrl = result.secure_url;
+          console.log(`[Cloudinary] Standalone upload successful! URL: ${fileUrl}`);
         }
+      } catch (cloudinaryErr: any) {
+        console.warn("[Cloudinary] Standalone upload failed, falling back to local files:", cloudinaryErr?.message || cloudinaryErr);
       }
-
-      // Return accessible URL path (either Cloudinary URL or local uploads fallback path)
-      res.json({ success: true, fileUrl, filename: safeName });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
     }
-  });
 
-  // Inquiries - Update status / mark contacted
-  app.put("/api/admin/inquiries/:id", async (req, res) => {
-    try {
-      await refreshStoreFromMongo();
-      const { id } = req.params;
-      const { status, contacted } = req.body;
-      const store = getStoreData();
+    res.json({ success: true, fileUrl, filename: safeName });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
-      const index = store.inquiries.findIndex(i => i.id === id);
-      if (index === -1) {
-        return res.status(404).json({ error: "Inquiry item not found." });
-      }
+app.put("/api/admin/inquiries/:id", (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, contacted } = req.body;
+    const store = getStoreData();
 
-      if (status !== undefined) {
-        store.inquiries[index].status = status;
-      }
-      if (contacted !== undefined) {
-        store.inquiries[index].contacted = !!contacted;
-      }
-
-      store.recentActivities.unshift({
-        id: "act-" + Date.now(),
-        text: `Inquiry status changed for "${store.inquiries[index].name}"`,
-        type: "contact",
-        timestamp: new Date().toISOString()
-      });
-
-      await saveStoreData(store);
-      res.json({ success: true, inquiry: store.inquiries[index] });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
+    const index = store.inquiries.findIndex((i: any) => i.id === id);
+    if (index === -1) {
+      return res.status(404).json({ error: "Inquiry item not found." });
     }
-  });
 
-  // Inquiries - Delete inquiry
-  app.delete("/api/admin/inquiries/:id", async (req, res) => {
-    try {
-      await refreshStoreFromMongo();
-      const { id } = req.params;
-      const store = getStoreData();
-
-      store.inquiries = store.inquiries.filter(i => i.id !== id);
-      
-      await saveStoreData(store);
-      res.json({ success: true, message: `Inquiry ${id} deleted.` });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
+    if (status !== undefined) {
+      store.inquiries[index].status = status;
     }
-  });
-
-  // Dynamic Amenities - Add/Delete/Edit
-  app.post("/api/admin/lifestyle-amenities", async (req, res) => {
-    try {
-      await refreshStoreFromMongo();
-      const { title, category, description, image } = req.body;
-      if (!title) {
-        return res.status(400).json({ error: "Amenity title is required." });
-      }
-      
-      const store = getStoreData();
-      const newAmenity = {
-        id: "amenity-" + Date.now(),
-        title,
-        category: category || "Clubhouse",
-        description: description || "Premium amenities spec",
-        image: image || "https://images.unsplash.com/photo-1600566753376-12c8ab7fb75b?auto=format&fit=crop&w=800&q=80"
-      };
-
-      store.lifestyleAmenities.push(newAmenity);
-      await saveStoreData(store);
-      res.status(201).json({ success: true, amenity: newAmenity });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
+    if (contacted !== undefined) {
+      store.inquiries[index].contacted = !!contacted;
     }
-  });
 
-  app.delete("/api/admin/lifestyle-amenities/:id", async (req, res) => {
-    try {
-      await refreshStoreFromMongo();
-      const { id } = req.params;
-      const store = getStoreData();
-      store.lifestyleAmenities = store.lifestyleAmenities.filter(a => a.id !== id);
-      await saveStoreData(store);
-      res.json({ success: true });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
+    store.recentActivities.unshift({
+      id: "act-" + Date.now(),
+      text: `Inquiry status changed for "${store.inquiries[index].name}"`,
+      type: "contact",
+      timestamp: new Date().toISOString()
+    });
+
+    saveStoreData(store);
+    res.json({ success: true, inquiry: store.inquiries[index] });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete("/api/admin/inquiries/:id", (req, res) => {
+  try {
+    const { id } = req.params;
+    const store = getStoreData();
+
+    store.inquiries = store.inquiries.filter((i: any) => i.id !== id);
+    
+    saveStoreData(store);
+    res.json({ success: true, message: `Inquiry ${id} deleted.` });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/admin/lifestyle-amenities", (req, res) => {
+  try {
+    const { title, category, description, image } = req.body;
+    if (!title) {
+      return res.status(400).json({ error: "Amenity title is required." });
     }
-  });
+    
+    const store = getStoreData();
+    const newAmenity = {
+      id: "amenity-" + Date.now(),
+      title,
+      category: category || "Clubhouse",
+      description: description || "Premium amenities spec",
+      image: image || "https://images.unsplash.com/photo-1600566753376-12c8ab7fb75b?auto=format&fit=crop&w=800&q=80"
+    };
 
-  // Testimonials - Create, edit, hide, delete
-  app.post("/api/admin/testimonials", async (req, res) => {
-    try {
-      await refreshStoreFromMongo();
-      const { name, role, content, rating, avatar, projectPurchased } = req.body;
-      if (!name || !content) {
-        return res.status(400).json({ error: "Customer name and feedback are required." });
-      }
+    store.lifestyleAmenities.push(newAmenity);
+    saveStoreData(store);
+    res.status(201).json({ success: true, amenity: newAmenity });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
-      const store = getStoreData();
-      const newTest = {
-        id: "t" + Date.now(),
-        name,
-        role: role || "Homeowner",
-        content,
-        rating: Number(rating) || 5,
-        avatar: avatar || "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=150&q=80",
-        projectPurchased: projectPurchased || "ERA Emerald Country Resort & Villas",
-        hidden: false
-      };
+app.delete("/api/admin/lifestyle-amenities/:id", (req, res) => {
+  try {
+    const { id } = req.params;
+    const store = getStoreData();
+    store.lifestyleAmenities = store.lifestyleAmenities.filter((a: any) => a.id !== id);
+    saveStoreData(store);
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
-      store.testimonials.push(newTest);
-      await saveStoreData(store);
-      res.status(201).json({ success: true, testimonial: newTest });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
+app.post("/api/admin/testimonials", (req, res) => {
+  try {
+    const { name, role, content, rating, avatar, projectPurchased } = req.body;
+    if (!name || !content) {
+      return res.status(400).json({ error: "Name and content are required parameters." });
     }
-  });
 
-  app.put("/api/admin/testimonials/:id", async (req, res) => {
-    try {
-      await refreshStoreFromMongo();
-      const { id } = req.params;
-      const { hidden, name, role, content, rating, avatar, projectPurchased } = req.body;
-      const store = getStoreData();
+    const store = getStoreData();
+    const newTestimonial = {
+      id: "t-" + Date.now(),
+      name,
+      role: role || "Customer",
+      content,
+      rating: Number(rating) || 5,
+      avatar: avatar || "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=150&q=80",
+      projectPurchased: projectPurchased || "Green Gold Valley",
+      hidden: false
+    };
 
-      const index = store.testimonials.findIndex(t => t.id === id);
-      if (index === -1) {
-        return res.status(404).json({ error: "Testimonial not found." });
-      }
+    store.testimonials.push(newTestimonial);
+    saveStoreData(store);
+    res.status(201).json({ success: true, testimonial: newTestimonial });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
-      if (hidden !== undefined) store.testimonials[index].hidden = !!hidden;
-      if (name !== undefined) store.testimonials[index].name = name;
-      if (role !== undefined) store.testimonials[index].role = role;
-      if (content !== undefined) store.testimonials[index].content = content;
-      if (rating !== undefined) store.testimonials[index].rating = Number(rating);
-      if (avatar !== undefined) store.testimonials[index].avatar = avatar;
-      if (projectPurchased !== undefined) store.testimonials[index].projectPurchased = projectPurchased;
+app.put("/api/admin/testimonials/:id", (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, role, content, rating, avatar, projectPurchased, hidden } = req.body;
+    const store = getStoreData();
 
-      await saveStoreData(store);
-      res.json({ success: true, testimonial: store.testimonials[index] });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
+    const index = store.testimonials.findIndex((t: any) => t.id === id);
+    if (index === -1) {
+      return res.status(404).json({ error: "Testimonial not found." });
     }
-  });
 
-  app.delete("/api/admin/testimonials/:id", async (req, res) => {
-    try {
-      await refreshStoreFromMongo();
-      const { id } = req.params;
-      const store = getStoreData();
-      store.testimonials = store.testimonials.filter(t => t.id !== id);
-      await saveStoreData(store);
-      res.json({ success: true });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
+    if (name !== undefined) store.testimonials[index].name = name;
+    if (role !== undefined) store.testimonials[index].role = role;
+    if (content !== undefined) store.testimonials[index].content = content;
+    if (rating !== undefined) store.testimonials[index].rating = Number(rating);
+    if (avatar !== undefined) store.testimonials[index].avatar = avatar;
+    if (projectPurchased !== undefined) store.testimonials[index].projectPurchased = projectPurchased;
+    if (hidden !== undefined) store.testimonials[index].hidden = !!hidden;
+
+    saveStoreData(store);
+    res.json({ success: true, testimonial: store.testimonials[index] });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete("/api/admin/testimonials/:id", (req, res) => {
+  try {
+    const { id } = req.params;
+    const store = getStoreData();
+    store.testimonials = store.testimonials.filter((t: any) => t.id !== id);
+    saveStoreData(store);
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Helper to format Cloudinary context string safely
+function formatCloudinaryContextString(title: any, category: any, projectId: any): string {
+  const cleanTitle = String(title || "Gallery Image").replace(/[|=]/g, " ");
+  const cleanCategory = String(category || "site").replace(/[|=]/g, " ");
+  const cleanProjectId = String(projectId || "").replace(/[|=]/g, " ");
+  return `title=${cleanTitle}|category=${cleanCategory}|projectId=${cleanProjectId}`;
+}
+
+// Shared handlers for gallery integration using direct Cloudinary storage
+const handleGetGallery = async (req: express.Request, res: express.Response) => {
+  try {
+    const items = await fetchGalleryFromCloudinary();
+    res.json({ success: true, galleryItems: items });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+const handlePostGallery = async (req: express.Request, res: express.Response) => {
+  try {
+    const { title, category, image, projectId } = req.body;
+    if (!image) {
+      return res.status(400).json({ error: "Image source link is mandatory." });
     }
-  });
 
-  // Helper to format Cloudinary context string safely
-  const formatCloudinaryContextString = (title: any, category: any, projectId: any): string => {
-    const cleanTitle = String(title || "Gallery Image").replace(/[|=]/g, " ");
-    const cleanCategory = String(category || "site").replace(/[|=]/g, " ");
-    const cleanProjectId = String(projectId || "").replace(/[|=]/g, " ");
-    return `title=${cleanTitle}|category=${cleanCategory}|projectId=${cleanProjectId}`;
-  };
+    let finalImageUrl = image;
+    let publicId = getPublicIdFromUrl(image);
 
-  // Shared handlers for gallery integration using direct Cloudinary storage
-  const handleGetGallery = async (req: express.Request, res: express.Response) => {
-    try {
-      await refreshStoreFromMongo();
-      const store = getStoreData();
-      const liveGallery = await fetchGalleryFromCloudinary();
-      const mergedMap = new Map();
-      for (const item of (store.galleryItems || [])) {
-        mergedMap.set(item.id, item);
-      }
-      for (const item of liveGallery) {
-        mergedMap.set(item.id, item);
-      }
-      const items = Array.from(mergedMap.values());
-      res.json({ success: true, galleryItems: items });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  };
+    const cloudinaryConfigured = !!(process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET);
 
-  const handlePostGallery = async (req: express.Request, res: express.Response) => {
-    try {
-      await refreshStoreFromMongo();
-      const { title, category, image, projectId } = req.body;
-      if (!image) {
-        return res.status(400).json({ error: "Image source link is mandatory." });
-      }
-
-      let finalImageUrl = image;
-      let publicId = getPublicIdFromUrl(image);
-
-      const cloudinaryConfigured = !!(process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET);
-
-      if (cloudinaryConfigured) {
-        if (image.startsWith("data:")) {
-          const safeName = "gallery_" + Date.now();
-          console.log(`[Cloudinary] Uploading base64 image ${safeName} directly to Cloudinary...`);
-          const result = await cloudinary.uploader.upload(image, {
-            folder: "era_infra",
-            public_id: safeName,
-            resource_type: "auto",
-            context: formatCloudinaryContextString(title, category, projectId)
-          });
-          if (result && result.secure_url) {
-            finalImageUrl = result.secure_url;
-            publicId = result.public_id;
-          }
-        } else if (publicId) {
-          console.log(`[Cloudinary] Updating metadata for public ID ${publicId} directly in Cloudinary...`);
-          await cloudinary.uploader.add_context(
-            formatCloudinaryContextString(title, category, projectId),
-            [publicId]
-          );
+    if (cloudinaryConfigured) {
+      if (image.startsWith("data:")) {
+        const safeName = "gallery_" + Date.now();
+        console.log(`[Cloudinary] Uploading base64 image ${safeName} directly to Cloudinary...`);
+        const result = await cloudinary.uploader.upload(image, {
+          folder: "era_infra",
+          public_id: safeName,
+          resource_type: "auto",
+          context: formatCloudinaryContextString(title, category, projectId)
+        });
+        if (result && result.secure_url) {
+          finalImageUrl = result.secure_url;
+          publicId = result.public_id;
         }
+      } else if (publicId) {
+        console.log(`[Cloudinary] Updating metadata for public ID ${publicId} directly in Cloudinary...`);
+        await cloudinary.uploader.add_context(
+          formatCloudinaryContextString(title, category, projectId),
+          [publicId]
+        );
       }
+    }
 
-      const store = getStoreData();
-      const newGalleryItem = {
+    res.status(201).json({
+      success: true,
+      galleryItem: {
         id: publicId || "gallery-" + Date.now(),
         title: title || "Gallery Image",
         category: category || "site",
         image: finalImageUrl,
         projectId: projectId || ""
-      };
-
-      if (!store.galleryItems) {
-        store.galleryItems = [];
       }
-      store.galleryItems = store.galleryItems.filter((g: any) => g.id !== newGalleryItem.id);
-      store.galleryItems.unshift(newGalleryItem);
-
-      store.recentActivities.unshift({
-        id: "act-" + Date.now(),
-        text: `New gallery image added to Layout Archive`,
-        type: "system",
-        timestamp: new Date().toISOString()
-      });
-
-      await saveStoreData(store);
-
-      res.status(201).json({
-        success: true,
-        galleryItem: newGalleryItem
-      });
-    } catch (err: any) {
-      console.error("[Cloudinary] Gallery POST error:", err);
-      res.status(500).json({ error: err.message });
-    }
-  };
-
-  const handlePutGallery = async (req: express.Request, res: express.Response) => {
-    try {
-      await refreshStoreFromMongo();
-      const { id } = req.params;
-      const { title, category, image, projectId } = req.body;
-
-      const cloudinaryConfigured = !!(process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET);
-
-      if (cloudinaryConfigured && id && !id.startsWith("gallery-bulk") && !id.startsWith("gallery-")) {
-        console.log(`[Cloudinary] Updating context for resource ${id} directly in Cloudinary...`);
-        await cloudinary.uploader.add_context(
-          formatCloudinaryContextString(title, category, projectId),
-          [id]
-        );
-      }
-
-      const store = getStoreData();
-      if (!store.galleryItems) {
-        store.galleryItems = [];
-      }
-      const index = store.galleryItems.findIndex((g: any) => g.id === id);
-      const updatedItem = {
-        id,
-        title: title || "Gallery Image",
-        category: category || "site",
-        image,
-        projectId: projectId || ""
-      };
-
-      if (index !== -1) {
-        store.galleryItems[index] = updatedItem;
-      } else {
-        store.galleryItems.push(updatedItem);
-      }
-
-      await saveStoreData(store);
-
-      res.json({
-        success: true,
-        galleryItem: updatedItem
-      });
-    } catch (err: any) {
-      console.error("[Cloudinary] Gallery PUT error:", err);
-      res.status(500).json({ error: err.message });
-    }
-  };
-
-  const handleDeleteGallery = async (req: express.Request, res: express.Response) => {
-    try {
-      await refreshStoreFromMongo();
-      const { id } = req.params;
-      const cloudinaryConfigured = !!(process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET);
-
-      if (cloudinaryConfigured && id && !id.startsWith("gallery-bulk") && !id.startsWith("gallery-")) {
-        console.log(`[Cloudinary] Destroying resource ${id} in Cloudinary...`);
-        await cloudinary.uploader.destroy(id);
-      }
-
-      const store = getStoreData();
-      if (store.galleryItems) {
-        store.galleryItems = store.galleryItems.filter((g: any) => g.id !== id);
-        await saveStoreData(store);
-      }
-
-      res.json({ success: true, message: "Gallery image removed successfully." });
-    } catch (err: any) {
-      console.error("[Cloudinary] Gallery DELETE error:", err);
-      res.status(500).json({ error: err.message });
-    }
-  };
-
-  // Gallery REST Endpoints
-  app.get("/api/gallery", handleGetGallery);
-  app.post("/api/gallery", handlePostGallery);
-  app.put("/api/gallery/:id", handlePutGallery);
-  app.delete("/api/gallery/:id", handleDeleteGallery);
-
-  // Legacy/Admin mappings
-  app.get("/api/admin/gallery", handleGetGallery);
-  app.post("/api/admin/gallery", handlePostGallery);
-  app.put("/api/admin/gallery/:id", handlePutGallery);
-  app.delete("/api/admin/gallery/:id", handleDeleteGallery);
-
-  // SEO Configurations Update
-  app.put("/api/admin/seo", async (req, res) => {
-    try {
-      await refreshStoreFromMongo();
-      const { home, about, projects, contact } = req.body;
-      const store = getStoreData();
-
-      if (home) store.seoSettings.home = { ...store.seoSettings.home, ...home };
-      if (about) store.seoSettings.about = { ...store.seoSettings.about, ...about };
-      if (projects) store.seoSettings.projects = { ...store.seoSettings.projects, ...projects };
-      if (contact) store.seoSettings.contact = { ...store.seoSettings.contact, ...contact };
-
-      store.recentActivities.unshift({
-        id: "act-" + Date.now(),
-        text: "SEO Metatags and custom rankings saved successfully",
-        type: "system",
-        timestamp: new Date().toISOString()
-      });
-
-      await saveStoreData(store);
-      res.json({ success: true, seoSettings: store.seoSettings });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // Handle Vite Asset Serving and Routing fallback in different environments
-  if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa"
     });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
+  } catch (err: any) {
+    console.error("[Cloudinary] Gallery POST error:", err);
+    res.status(500).json({ error: err.message });
   }
+};
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`[ERA INFRA API] Server is successfully running on port ${PORT}`);
-  });
-}
+const handlePutGallery = async (req: express.Request, res: express.Response) => {
+  try {
+    const { id } = req.params;
+    const { title, category, image, projectId } = req.body;
 
-startServer();
+    const cloudinaryConfigured = !!(process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET);
+
+    if (cloudinaryConfigured && id && !id.startsWith("gallery-bulk") && !id.startsWith("gallery-")) {
+      console.log(`[Cloudinary] Updating context for resource ${id} directly in Cloudinary...`);
+      await cloudinary.uploader.add_context(
+        formatCloudinaryContextString(title, category, projectId),
+        [id]
+      );
+    }
+
+    res.json({
+      success: true,
+      galleryItem: {
+        id,
+        title,
+        category,
+        image,
+        projectId
+      }
+    });
+  } catch (err: any) {
+    console.error("[Cloudinary] Gallery PUT error:", err);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+const handleDeleteGallery = async (req: express.Request, res: express.Response) => {
+  try {
+    const { id } = req.params;
+    const cloudinaryConfigured = !!(process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET);
+
+    if (cloudinaryConfigured && id && !id.startsWith("gallery-bulk") && !id.startsWith("gallery-")) {
+      console.log(`[Cloudinary] Destroying resource ${id} in Cloudinary...`);
+      await cloudinary.uploader.destroy(id);
+    }
+
+    res.json({ success: true, message: "Gallery image removed successfully." });
+  } catch (err: any) {
+    console.error("[Cloudinary] Gallery DELETE error:", err);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// Gallery REST Endpoints
+app.get("/api/gallery", handleGetGallery);
+app.post("/api/gallery", handlePostGallery);
+app.put("/api/gallery/:id", handlePutGallery);
+app.delete("/api/gallery/:id", handleDeleteGallery);
+
+// Legacy/Admin mappings
+app.get("/api/admin/gallery", handleGetGallery);
+app.post("/api/admin/gallery", handlePostGallery);
+app.put("/api/admin/gallery/:id", handlePutGallery);
+app.delete("/api/admin/gallery/:id", handleDeleteGallery);
+
+app.put("/api/admin/seo", (req, res) => {
+  try {
+    const seoData = req.body;
+    const store = getStoreData();
+
+    store.seoSettings = {
+      home: seoData.home || store.seoSettings.home,
+      about: seoData.about || store.seoSettings.about,
+      projects: seoData.projects || store.seoSettings.projects,
+      contact: seoData.contact || store.seoSettings.contact
+    };
+
+    saveStoreData(store);
+    res.json({ success: true, seoSettings: store.seoSettings });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`[Standalone Backend] Running perfectly on port ${PORT}`);
+});
