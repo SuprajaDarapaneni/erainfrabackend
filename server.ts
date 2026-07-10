@@ -27,7 +27,7 @@ import {
   ISeoSettings,
   IDownloadCount,
   ILocalUpload
-} from "./models.js";
+} from "./models";
 
 // Load environment variables from .env
 dotenv.config();
@@ -88,21 +88,21 @@ const INITIAL_DATA = {
     slogan: "Low Price Plots and Resorts in Best Locations.",
     subtitle: "Resorts ★ Open Plots ★ Farm Lands",
     mdName: "Ravi Kiran Guthikonda",
-    mdRole: "Managing Director",
+    mdRole: "Chairman",
     phone1: "9885245679",
     phone2: "9440118888",
     email: "sales@erainfradevelopers.com",
     address: "# 40-9-87/2, House No: 22, 2nd Line, Sai Nagar Near Benz Circle, Vijayawada - 520 008.",
     stats: [
       { label: "Years of Experience", value: 12, suffix: "+" },
-      { label: "Projects Finished", value: 9, suffix: "" },
-      { label: "Happy Customers", value: 1250, suffix: "+" },
-      { label: "Acres Land Developed", value: 200, suffix: " Acres" }
+      { label: "Projects Finished", value: 0, suffix: "" },
+      { label: "Happy Customers", value: 0, suffix: "+" },
+      { label: "Acres Land Developed", value: 0, suffix: " Acres" }
     ],
-    aboutStory: "ERA INFRA DEVELOPERS is a very trusted company in Vijayawada. Under the guidance of our MD, Ravi Kiran Guthikonda, we buy fully cleared land and develop premium plots and resorts for our clients at best rates.",
-    vision: "To be the most trusted and friendly real estate company in Vijayawada with simple rules, clear documents, and top developments.",
-    mission: "To help common people buy beautiful land with trees, water, and full-time safety at very affordable price.",
-    headerVideo: "/assets/township_drone.mp4",
+    aboutStory: "ERA INFRA DEVELOPERS is a very trusted company in Vijayawada.",
+    vision: "To provide world-class gated communities, premium open plots, and scenic resort farm lands at affordable price points with absolute transparency and clear documents.",
+    mission: "To help thousands of families secure their high-return real estate investments with pristine development quality and hassle-free registration processes in the best growing locations.",
+    headerVideo: "/uploads/township_drone.mp4",
     founderName: "Ravi Kiran Guthikonda",
     founderImage: "/uploads/founder_portrait.jpeg",
     founderBio: "Ravi Kiran Guthikonda is the Managing Director of ERA INFRA. He has more than 12 years of experience in Vijayawada real estate. He works very hard to give clear documents, easy registration, and beautiful layouts with plants and trees. He already helped more than 1200 families to buy premium lands at low budget. His new project Green Gold Valley is very popular.",
@@ -200,179 +200,19 @@ const INITIAL_DATA = {
       }
     ]
   },
-  projects: [
-    {
-      id: "era-green-gold-valley",
-      name: "Green Gold Valley (గ్రీన్ గోల్డ్ వ్యాలీ)",
-      location: "Krishnavaram (Kommuru), Near ORR & Mallavalli Industrial Area, Vijayawada",
-      type: "Resorts",
-      priceRange: "₹9 Lakhs - ₹35 Lakhs",
-      priceMin: 9,
-      amenities: [
-        "100% Vastu Compliant (100% వాస్తు)",
-        "All-round Compound Wall (చుట్టూ కాంపౌండ్ వాల్)",
-        "Grand Entrance Main Gate (ఎంట్రన్స్ メイン గేట్)",
-        "Farm Land Plots from 200 Sq. Yards (200 గజాల నుంచి ప్రారంభం)",
-        "30 & 24 Feet Wide Roads (30, 24 అడుగుల రోడ్లు)",
-        "Electricity Facility (విద్యుత్ సదుపాయం)",
-        "Lush Fruits & Mango Groves (అన్ని రకాల ఫ్రూట్ ప్లాంట్స్ తో కూడిన వనం)",
-        "24/7 Security & CCTV Supervision (24/7 సెక్యూరిటీ సి.సి. కెమెరా పర్యవేక్షణ)",
-        "Kids Play Sandbox Park (చిల్డ్రన్స్ పార్క్)",
-        "Spot Registration (స్పాట్ రిజిస్ట్రేషన్)",
-        "On-Demand Custom Wooden Farm House (కస్టమర్స్ కోరిక మేరకు ఫామ్ హౌస్)"
-      ],
-      status: "Ongoing",
-      image: "https://images.unsplash.com/photo-1510798831971-661eb04b3739?auto=format&fit=crop&w=1200&q=80",
-      description: "ERA INFRA presents Green Gold Valley (గ్రీన్ గోల్డ్ వ్యాలీ). It is a beautiful farm land and resort project with real 25-years old sweet mango trees (మామిడి తోటలు). It is located very close to Vijayawada city - just 1 KM from Amaravathi Outer Ring Road (ORR) and only 2 KM from Mallavalli Industrial Area. Here you get fresh air, nice children's park, 24-hours gate security, and nice wooden holiday farmhouses at the lowest price.",
-      acres: "50+ Acres (Real Mango Gardens)",
-      units: "200+ Farm Plots",
-      sizeRange: "200 - 800 Sq.Yards",
-      reraNo: "AP-RERA/2026/0885",
-      mapLink: "https://maps.google.com/?q=Vijayawada",
-      originalFeatured: true,
-      brochureUrl: ""
-    }
-  ],
-  lifestyleAmenities: [
-    {
-      id: "clubhouse",
-      title: "Beautiful Clubhouse",
-      category: "Clubhouse",
-      description: "Big clubhouse building with safe play areas, walking space, and function rooms for family celebrations.",
-      image: "https://images.unsplash.com/photo-1600566753376-12c8ab7fb75b?auto=format&fit=crop&w=800&q=80"
-    },
-    {
-      id: "landscaped-gardens",
-      title: "Lush Green Parks",
-      category: "Nature",
-      description: "Fresh air with thousands of green trees, sweet mango gardens, and peaceful walking tracks.",
-      image: "https://images.unsplash.com/photo-1558904541-efa8c3a30fc9?auto=format&fit=crop&w=800&q=80"
-    },
-    {
-      id: "security-guard",
-      title: "100% Safe Gate Security",
-      category: "Security",
-      description: "Always security guards at the main gate, full boundary walls, and CCTV cameras working 24/7.",
-      image: "https://images.unsplash.com/photo-1558002038-1055907df827?auto=format&fit=crop&w=800&q=80"
-    },
-    {
-      id: "kids-play",
-      title: "Children's Play Park",
-      category: "Sports",
-      description: "Fun slides, swings, and sandbox play zones for kids to play safely away from vehicle traffic.",
-      image: "https://images.unsplash.com/photo-1596464716127-f2a82984de30?auto=format&fit=crop&w=800&q=80"
-    }
-  ],
-  testimonials: [
-    {
-      id: "t1",
-      name: "Dr. Srinivas Rao",
-      role: "Doctor",
-      content: "I searched many places near Vijayawada. Finally, I bought a plot in Green Gold Valley. The registration was very quick, and the document papers are 100% clear. Ravi Kiran is a very honest builder.",
-      rating: 5,
-      avatar: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=150&q=80",
-      projectPurchased: "Green Gold Valley (గ్రీన్ గోల్డ్ వ్యాలీ)",
-      hidden: false
-    },
-    {
-      id: "t2",
-      name: "M. Satyanarayana",
-      role: "Retired Govt. Officer",
-      content: "Great investment! I bought a resort plot at a very low budget. Now the Outer Ring Road is coming near Krishnavaram, and my plot price has increased so much. Very good service by ERA INFRA team.",
-      rating: 5,
-      avatar: "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=150&q=80",
-      projectPurchased: "Green Gold Valley (గ్రీన్ గోల్డ్ వ్యాలీ)",
-      hidden: false
-    },
-    {
-      id: "t3",
-      name: "Priyanka Reddy",
-      role: "Software engineer",
-      content: "I live outside but wanted a good open plot near Vijayawada ORR. ERA INFRA team did everything online and showed the site over video call. Spot registration was very smooth and fast.",
-      rating: 5,
-      avatar: "https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&w=150&q=80",
-      projectPurchased: "Green Gold Valley (గ్రీన్ గోల్డ్ వ్యాలీ)",
-      hidden: false
-    }
-  ],
-  galleryItems: [
-    {
-      id: "g-1",
-      title: "Green Gold Valley Gated Layout Entrance",
-      category: "site",
-      image: "https://images.unsplash.com/photo-1595974482597-4b8da8879bc5?auto=format&fit=crop&w=1200&q=80",
-      projectId: "era-green-gold-valley"
-    },
-    {
-      id: "g-7",
-      title: "Lush Green Paddy Fields & Surrounding Nature",
-      category: "site",
-      image: "https://images.unsplash.com/photo-1500382017468-9049fed747ef?auto=format&fit=crop&w=1200&q=80",
-      projectId: "era-green-gold-valley"
-    },
-    {
-      id: "g-2",
-      title: "Premium Wooden Cottages & Resorts",
-      category: "completed",
-      image: "https://images.unsplash.com/photo-1510798831971-661eb04b3739?auto=format&fit=crop&w=1200&q=80",
-      projectId: "era-green-gold-valley"
-    },
-    {
-      id: "g-3",
-      title: "Sweet Organic Mango Grove Plots",
-      category: "amenities",
-      image: "https://images.unsplash.com/photo-1464226184884-fa280b87c399?auto=format&fit=crop&w=1200&q=80",
-      projectId: "era-green-gold-valley"
-    },
-    {
-      id: "g-4",
-      title: "24/7 Gate Security Compound Wall",
-      category: "amenities",
-      image: "https://images.unsplash.com/photo-1558002038-1055907df827?auto=format&fit=crop&w=800&q=80",
-      projectId: "era-green-gold-valley"
-    },
-    {
-      id: "g-5",
-      title: "Luxury Residents Clubhouse Building",
-      category: "completed",
-      image: "https://images.unsplash.com/photo-1600566753376-12c8ab7fb75b?auto=format&fit=crop&w=800&q=80",
-      projectId: "era-green-gold-valley"
-    },
-    {
-      id: "g-6",
-      title: "Ongoing Road Construction & Electricity Updates",
-      category: "updates",
-      image: "https://images.unsplash.com/photo-1508193638397-1c4234db14d8?auto=format&fit=crop&w=1200&q=80",
-      projectId: "era-green-gold-valley"
-    }
-  ],
-  inquiries: [
-    {
-      id: "inq-2",
-      name: "Sowmya Lakshmi",
-      phone: "7013884210",
-      email: "sowmya.l@outlook.com",
-      projectSelected: "Green Gold Valley (గ్రీన్ గోల్డ్ వ్యాలీ)",
-      propertyType: "Plots",
-      budget: "Under ₹50 Lakhs",
-      message: "Interested in the 200 sq. yard plot near ORR. When can I schedule a personal car visit?",
-      visitDate: "2026-06-18",
-      timestamp: "2026-06-15T22:45:00Z",
-      status: "Pending",
-      contacted: false
-    }
-  ],
-  recentActivities: [
-    { id: "act-1", text: "New site visit inquiry from Sowmya Lakshmi for Green Gold Valley", type: "booking", timestamp: "2026-06-15T22:45:00Z" },
-    { id: "act-3", text: "Interactive CMS Store initialized successfully", type: "system", timestamp: "2026-06-15T09:00:00Z" }
-  ],
+  projects: [],
+  lifestyleAmenities: [],
+  testimonials: [],
+  galleryItems: [],
+  inquiries: [],
+  recentActivities: [],
   seoSettings: {
-    home: { title: "Era Infra Developers | Resorts, Plots & Luxury Villas in Vijayawada", description: "RERA approved gated open plot layout communities, premium holiday resort estates, and ultra-luxury duplex villas near Benz Circle, Vijayawada. Explore Era properties now." },
-    about: { title: "About Era Infra Developers | Vijayawada Real Estate Promoters", description: "Learn about MD Ravi Kiran Guthikonda's leadership, our historical developments, and clear title real estate layout standard." },
-    projects: { title: "Signature Developments | Plots, Villas & Resorts in Vijayawada", description: "Explore premium ready-for-construction plots, duplex gated villas, and organic resort communities in rapid expansion corridors." },
-    contact: { title: "Schedule Site Visit | Era Corporate Contacts", description: "Book free chauffeured tours, view office directions near Benz Circle, and contact MD Ravi Kiran Guthikonda's priority sales desk." }
+    home: { title: "Era Infra Developers | Resorts, Plots & Luxury Villas in Vijayawada", description: "Approved gated open plot layouts and premium resort land communities near Vijayawada. Explore Era properties now." },
+    about: { title: "About Era Infra Developers", description: "Learn about Era Infra Developers." },
+    projects: { title: "Signature Developments", description: "Explore beautiful plots, luxury villas, and organic resort lands." },
+    contact: { title: "Contact Us", description: "Get in touch with Era Infra Developers." }
   },
-  downloadCount: 42
+  downloadCount: 0
 };
 
 // Initialize Cloudinary if credentials exist
@@ -648,7 +488,7 @@ async function startServer() {
       const { name, phone, email, projectSelected, propertyType, budget, message, visitDate } = req.body;
       
       if (!name || !phone) {
-         return res.status(400).json({ error: "Name and phone number fields are mandatory." });
+        return res.status(400).json({ error: "Name and phone number fields are mandatory." });
       }
 
       const newInq = await Inquiry.create({
@@ -782,6 +622,39 @@ async function startServer() {
       });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // API to completely clear all dynamic data collections for a clean start
+  app.post("/api/admin/clear-all-data", async (req, res) => {
+    try {
+      console.log("[MongoDB] Admin requested wiping all dynamic database records...");
+      
+      // Delete all records from user-controlled collections
+      await Project.deleteMany({});
+      await LifestyleAmenity.deleteMany({});
+      await Testimonial.deleteMany({});
+      await GalleryItem.deleteMany({});
+      await Inquiry.deleteMany({});
+      await RecentActivity.deleteMany({});
+      
+      // Reset CompanyDetails to clean slate
+      await CompanyDetails.deleteMany({});
+      await CompanyDetails.create(INITIAL_DATA.companyDetails);
+      
+      // Reset SEO Settings
+      await SeoSettings.deleteMany({});
+      await SeoSettings.create(INITIAL_DATA.seoSettings);
+
+      // Reset brochure download count
+      await DownloadCount.deleteMany({});
+      await DownloadCount.create({ count: 0 });
+
+      console.log("[MongoDB] All collections cleared successfully.");
+      res.json({ success: true, message: "Database wiped and reset to clean slate successfully." });
+    } catch (err: any) {
+      console.error("[MongoDB] Failed to clear all data:", err.message);
+      res.status(500).json({ error: err.message });
     }
   });
 
@@ -1323,7 +1196,12 @@ async function startServer() {
       const { home, about, projects, contact } = req.body;
       
       const existingSeo = await SeoSettings.findOne();
-      const currentSeo: any = existingSeo ? existingSeo.toObject() : JSON.parse(JSON.stringify(INITIAL_DATA.seoSettings));
+      const currentSeo: any = existingSeo ? existingSeo.toObject() : {
+        home: { title: "", description: "" },
+        about: { title: "", description: "" },
+        projects: { title: "", description: "" },
+        contact: { title: "", description: "" }
+      };
 
       if (home) currentSeo.home = { ...currentSeo.home, ...home };
       if (about) currentSeo.about = { ...currentSeo.about, ...about };
