@@ -27,13 +27,16 @@ import {
   ISeoSettings,
   IDownloadCount,
   ILocalUpload
-} from "./models";
+} from "./models.js";
 
 // Load environment variables from .env
 dotenv.config();
 
+const ROOT_DIR = process.cwd().endsWith("backend") ? path.join(process.cwd(), "..") : process.cwd();
+const BACKEND_DIR = process.cwd().endsWith("backend") ? process.cwd() : path.join(process.cwd(), "backend");
+
 // Parse .env.example if .env does not exist to load local user customization variables securely
-const envExamplePath = path.join(process.cwd(), ".env.example");
+const envExamplePath = path.join(ROOT_DIR, ".env.example");
 if (fs.existsSync(envExamplePath)) {
   try {
     const envContent = fs.readFileSync(envExamplePath, "utf-8");
@@ -57,11 +60,11 @@ if (fs.existsSync(envExamplePath)) {
 }
 
 // Define the store file location
-const STORE_DIR = path.join(process.cwd(), "data");
+const STORE_DIR = path.join(ROOT_DIR, "data");
 const STORE_FILE = path.join(STORE_DIR, "store.json");
-const UPLOADS_DIR = path.join(process.cwd(), "uploads");
-const PUBLIC_UPLOADS_DIR = path.join(process.cwd(), "public", "uploads");
-const BACKEND_PUBLIC_UPLOADS_DIR = path.join(process.cwd(), "backend", "public", "uploads");
+const UPLOADS_DIR = path.join(ROOT_DIR, "uploads");
+const PUBLIC_UPLOADS_DIR = path.join(ROOT_DIR, "public", "uploads");
+const BACKEND_PUBLIC_UPLOADS_DIR = path.join(BACKEND_DIR, "public", "uploads");
 
 // Ensure directories exist
 if (!fs.existsSync(STORE_DIR)) {
@@ -645,7 +648,7 @@ async function startServer() {
       const { name, phone, email, projectSelected, propertyType, budget, message, visitDate } = req.body;
       
       if (!name || !phone) {
-        return res.status(400).json({ error: "Name and phone number fields are mandatory." });
+         return res.status(400).json({ error: "Name and phone number fields are mandatory." });
       }
 
       const newInq = await Inquiry.create({
@@ -1353,7 +1356,7 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), "dist");
+    const distPath = path.join(ROOT_DIR, "dist");
     app.use(express.static(distPath));
     app.get("*", (req, res) => {
       res.sendFile(path.join(distPath, "index.html"));
