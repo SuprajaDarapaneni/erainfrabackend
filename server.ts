@@ -394,6 +394,65 @@ async function startServer() {
     next();
   });
 
+  // --- ADMIN SESSION AUTHENTICATION ---
+  // Every previous "admin" route had zero server-side auth enforcement: the login
+  // endpoint handed back a fixed, guessable token string but nothing ever checked
+  // it again, so any client (or bot/scanner on the internet) could call the write
+  // endpoints directly — including /api/admin/clear-all-data — with no login at all.
+  // This is almost certainly why records disappeared: it takes just one unauthenticated
+  // POST to wipe Projects/Testimonials/Gallery/Amenities/CompanyDetails/SEO out of MongoDB,
+  // while Cloudinary assets stay untouched (that handler never calls cloudinary.destroy).
+  interface AdminSession {
+    email: string;
+    role: string;
+    name: string;
+    expiresAt: number;
+  }
+  const activeAdminSessions = new Map<string, AdminSession>();
+  const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours
+
+  const issueSessionToken = (user: { email: string; role: string; name: string }): string => {
+    const token = crypto.randomBytes(32).toString("hex");
+    activeAdminSessions.set(token, { ...user, expiresAt: Date.now() + SESSION_TTL_MS });
+    return token;
+  };
+
+  // Periodically sweep expired sessions so the in-memory map doesn't grow forever
+  setInterval(() => {
+    const now = Date.now();
+    for (const [token, session] of activeAdminSessions.entries()) {
+      if (session.expiresAt < now) activeAdminSessions.delete(token);
+    }
+  }, 30 * 60 * 1000);
+
+  const requireAdminAuth = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const authHeader = req.headers.authorization || "";
+    const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+    if (!token) {
+      return res.status(401).json({ error: "Missing admin session token. Please log in again." });
+    }
+    const session = activeAdminSessions.get(token);
+    if (!session || session.expiresAt < Date.now()) {
+      activeAdminSessions.delete(token);
+      return res.status(401).json({ error: "Session expired or invalid. Please log in again." });
+    }
+    (req as any).adminUser = session;
+    next();
+  };
+
+  // Very basic login rate limiting to slow down credential brute-forcing
+  const loginAttempts = new Map<string, { count: number; resetAt: number }>();
+  const isLoginRateLimited = (ip: string): boolean => {
+    const entry = loginAttempts.get(ip);
+    const now = Date.now();
+    if (!entry || entry.resetAt < now) {
+      loginAttempts.set(ip, { count: 1, resetAt: now + 15 * 60 * 1000 });
+      return false;
+    }
+    entry.count += 1;
+    return entry.count > 10;
+  };
+
   // Static uploads directory serving link
   app.get("/uploads/:filename", async (req, res) => {
     try {
@@ -554,39 +613,55 @@ async function startServer() {
 
   // Auth credentials verification
   app.post("/api/admin/login", (req, res) => {
-    const { email, password } = req.body;
-    
-    // Support customized credentials defined in your private AI Studio Settings Secrets or .env.example
-    const secureAdminEmail = process.env.ADMIN_EMAIL || "admin@erainfra.com";
-    const secureAdminPassword = process.env.ADMIN_PASSWORD || "admin123";
-
-    // Super Admin Credentials (checks customized secure values or classic system defaults)
-    if (
-      (email === secureAdminEmail && password === secureAdminPassword) ||
-      (email === "admin@erainfra.com" && password === "admin123") ||
-      (email === "admin@erainfra.com" && password === "admin")
-    ) {
-      return res.json({
-        success: true,
-        user: { email: email === "admin@erainfra.com" ? email : secureAdminEmail, role: "Super Admin", name: "Ravi Kiran (MD)" },
-        token: "session-super-admin-web-token-10774"
-      });
+    const clientIp = req.ip || req.socket.remoteAddress || "unknown";
+    if (isLoginRateLimited(clientIp)) {
+      return res.status(429).json({ error: "Too many login attempts. Please try again in 15 minutes." });
     }
-    
-    // Content Manager Credentials (only allow managers if custom admin email is not set or if specified explicitly)
-    if (email === "manager@erainfra.com" && password === "manager123") {
-      return res.json({
-        success: true,
-        user: { email, role: "Content Manager", name: "Desk Coordinator" },
-        token: "session-content-manager-web-token-5511"
-      });
+
+    const { email, password } = req.body;
+
+    // Credentials now MUST come from environment variables in production. The old
+    // hardcoded "admin123"/"admin" fallbacks are only used in local development
+    // (no NODE_ENV=production) so a forgotten .env can never leave the live site
+    // protected by a guessable default password.
+    const isProduction = process.env.NODE_ENV === "production";
+    const secureAdminEmail = process.env.ADMIN_EMAIL || (isProduction ? undefined : "admin@erainfra.com");
+    const secureAdminPassword = process.env.ADMIN_PASSWORD || (isProduction ? undefined : "admin123");
+
+    if (isProduction && (!process.env.ADMIN_EMAIL || !process.env.ADMIN_PASSWORD)) {
+      console.error("[Auth] ADMIN_EMAIL / ADMIN_PASSWORD are not set in production environment variables. Admin login is disabled until these are configured.");
+      return res.status(500).json({ error: "Admin login is not configured on the server. Set ADMIN_EMAIL and ADMIN_PASSWORD environment variables." });
+    }
+
+    // Super Admin
+    if (secureAdminEmail && secureAdminPassword && email === secureAdminEmail && password === secureAdminPassword) {
+      const user = { email: secureAdminEmail, role: "Super Admin", name: "Ravi Kiran (MD)" };
+      const token = issueSessionToken(user);
+      return res.json({ success: true, user, token });
+    }
+
+    // Content Manager Credentials
+    const managerEmail = process.env.MANAGER_EMAIL || (isProduction ? undefined : "manager@erainfra.com");
+    const managerPassword = process.env.MANAGER_PASSWORD || (isProduction ? undefined : "manager123");
+    if (managerEmail && managerPassword && email === managerEmail && password === managerPassword) {
+      const user = { email, role: "Content Manager", name: "Desk Coordinator" };
+      const token = issueSessionToken(user);
+      return res.json({ success: true, user, token });
     }
 
     return res.status(401).json({ error: "Invalid login email or password." });
   });
 
+  // Logout: invalidate the session token server-side
+  app.post("/api/admin/logout", requireAdminAuth, (req, res) => {
+    const authHeader = req.headers.authorization || "";
+    const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+    if (token) activeAdminSessions.delete(token);
+    res.json({ success: true });
+  });
+
   // Database and storage connectivity diagnostic check API
-  app.get("/api/admin/db-status", async (req, res) => {
+  app.get("/api/admin/db-status", requireAdminAuth, async (req, res) => {
     try {
       const storePath = STORE_FILE;
       const storeSize = fs.existsSync(storePath) ? fs.statSync(storePath).size : 0;
@@ -626,9 +701,17 @@ async function startServer() {
   });
 
   // API to completely clear all dynamic data collections for a clean start
-  app.post("/api/admin/clear-all-data", async (req, res) => {
+  app.post("/api/admin/clear-all-data", requireAdminAuth, async (req, res) => {
     try {
-      console.log("[MongoDB] Admin requested wiping all dynamic database records...");
+      // Extra safety: this is destructive and irreversible, so require the admin
+      // to re-enter their password in the request body on top of a valid session.
+      const { confirmPassword } = req.body || {};
+      const expectedPassword = process.env.ADMIN_PASSWORD || (process.env.NODE_ENV === "production" ? undefined : "admin123");
+      if (!expectedPassword || confirmPassword !== expectedPassword) {
+        return res.status(403).json({ error: "Incorrect confirmation password. Data was not cleared." });
+      }
+
+      console.log(`[MongoDB] Admin (${(req as any).adminUser?.email}) requested wiping all dynamic database records...`);
       
       // Delete all records from user-controlled collections
       await Project.deleteMany({});
@@ -659,7 +742,7 @@ async function startServer() {
   });
 
   // Update complete company profile (CMS)
-  app.put("/api/admin/company", async (req, res) => {
+  app.put("/api/admin/company", requireAdminAuth, async (req, res) => {
     try {
       const updateData = req.body;
       
@@ -679,7 +762,7 @@ async function startServer() {
   });
 
   // Projects - Create new project
-  app.post("/api/admin/projects", async (req, res) => {
+  app.post("/api/admin/projects", requireAdminAuth, async (req, res) => {
     try {
       const project = req.body;
       if (!project.name) {
@@ -723,7 +806,7 @@ async function startServer() {
   });
 
   // Projects - Edit project
-  app.put("/api/admin/projects/:id", async (req, res) => {
+  app.put("/api/admin/projects/:id", requireAdminAuth, async (req, res) => {
     try {
       const { id } = req.params;
       const projectData = req.body;
@@ -769,7 +852,7 @@ async function startServer() {
   });
 
   // Projects - Delete project
-  app.delete("/api/admin/projects/:id", async (req, res) => {
+  app.delete("/api/admin/projects/:id", requireAdminAuth, async (req, res) => {
     try {
       const { id } = req.params;
       
@@ -792,7 +875,7 @@ async function startServer() {
   });
 
   // Base64 file uploader handler with persistent Cloudinary storage and local disk fallback
-  app.post("/api/admin/upload", async (req, res) => {
+  app.post("/api/admin/upload", requireAdminAuth, async (req, res) => {
     try {
       const { filename, base64Data, contentType } = req.body;
       if (!filename || !base64Data) {
@@ -892,7 +975,7 @@ async function startServer() {
   });
 
   // Inquiries - Update status / mark contacted
-  app.put("/api/admin/inquiries/:id", async (req, res) => {
+  app.put("/api/admin/inquiries/:id", requireAdminAuth, async (req, res) => {
     try {
       const { id } = req.params;
       const { status, contacted } = req.body;
@@ -926,7 +1009,7 @@ async function startServer() {
   });
 
   // Inquiries - Delete inquiry
-  app.delete("/api/admin/inquiries/:id", async (req, res) => {
+  app.delete("/api/admin/inquiries/:id", requireAdminAuth, async (req, res) => {
     try {
       const { id } = req.params;
 
@@ -942,7 +1025,7 @@ async function startServer() {
   });
 
   // Dynamic Amenities - Add/Delete/Edit
-  app.post("/api/admin/lifestyle-amenities", async (req, res) => {
+  app.post("/api/admin/lifestyle-amenities", requireAdminAuth, async (req, res) => {
     try {
       const { title, category, description, image } = req.body;
       if (!title) {
@@ -963,7 +1046,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/admin/lifestyle-amenities/:id", async (req, res) => {
+  app.delete("/api/admin/lifestyle-amenities/:id", requireAdminAuth, async (req, res) => {
     try {
       const { id } = req.params;
       const deleted = await LifestyleAmenity.findOneAndDelete({ id });
@@ -977,7 +1060,7 @@ async function startServer() {
   });
 
   // Testimonials - Create, edit, hide, delete
-  app.post("/api/admin/testimonials", async (req, res) => {
+  app.post("/api/admin/testimonials", requireAdminAuth, async (req, res) => {
     try {
       const { name, role, content, rating, avatar, projectPurchased } = req.body;
       if (!name || !content) {
@@ -1001,7 +1084,7 @@ async function startServer() {
     }
   });
 
-  app.put("/api/admin/testimonials/:id", async (req, res) => {
+  app.put("/api/admin/testimonials/:id", requireAdminAuth, async (req, res) => {
     try {
       const { id } = req.params;
       const { hidden, name, role, content, rating, avatar, projectPurchased } = req.body;
@@ -1028,7 +1111,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/admin/testimonials/:id", async (req, res) => {
+  app.delete("/api/admin/testimonials/:id", requireAdminAuth, async (req, res) => {
     try {
       const { id } = req.params;
       const deleted = await Testimonial.findOneAndDelete({ id });
@@ -1178,20 +1261,21 @@ async function startServer() {
     }
   };
 
-  // Gallery REST Endpoints
+  // Gallery REST Endpoints (reads stay public so the live website can render the gallery;
+  // writes/deletes require a valid admin session)
   app.get("/api/gallery", handleGetGallery);
-  app.post("/api/gallery", handlePostGallery);
-  app.put("/api/gallery/:id", handlePutGallery);
-  app.delete("/api/gallery/:id", handleDeleteGallery);
+  app.post("/api/gallery", requireAdminAuth, handlePostGallery);
+  app.put("/api/gallery/:id", requireAdminAuth, handlePutGallery);
+  app.delete("/api/gallery/:id", requireAdminAuth, handleDeleteGallery);
 
   // Legacy/Admin mappings
-  app.get("/api/admin/gallery", handleGetGallery);
-  app.post("/api/admin/gallery", handlePostGallery);
-  app.put("/api/admin/gallery/:id", handlePutGallery);
-  app.delete("/api/admin/gallery/:id", handleDeleteGallery);
+  app.get("/api/admin/gallery", requireAdminAuth, handleGetGallery);
+  app.post("/api/admin/gallery", requireAdminAuth, handlePostGallery);
+  app.put("/api/admin/gallery/:id", requireAdminAuth, handlePutGallery);
+  app.delete("/api/admin/gallery/:id", requireAdminAuth, handleDeleteGallery);
 
   // SEO Configurations Update
-  app.put("/api/admin/seo", async (req, res) => {
+  app.put("/api/admin/seo", requireAdminAuth, async (req, res) => {
     try {
       const { home, about, projects, contact } = req.body;
       
